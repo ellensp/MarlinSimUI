@@ -215,27 +215,27 @@ void ST7920Device::save_lcd_capture(const std::string& prefix) {
   auto now = std::chrono::system_clock::now();
   auto time_t = std::chrono::system_clock::to_time_t(now);
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-  
+
   std::stringstream ss;
-  ss << prefix << "_" << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S") 
+  ss << prefix << "_" << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S")
      << "_" << std::setfill('0') << std::setw(3) << ms.count() << ".pbm";
-  
+
   const int width = 128;
-  const int height = 64; 
+  const int height = 64;
   const int graphic_ram_size = 64 * 32;
-  
+
   // Save the graphic RAM as PBM image
   std::ofstream file(ss.str());
   if (!file.is_open()) {
     std::cerr << "Failed to open file: " << ss.str() << std::endl;
     return;
   }
-  
+
   // PBM header
   file << "P1\n";
   file << "# LCD Capture from MarlinSimulator ST7920Device\n";
   file << width << " " << height << "\n";
-  
+
   // Write pixel data (ST7920 graphic RAM format)
   for (int y = 0; y < height; y++) {
     for (int x = 0; x < width; x++) {
@@ -245,7 +245,7 @@ void ST7920Device::save_lcd_capture(const std::string& prefix) {
       int ram_x = x;
       int byte_index = ram_y * 32 + (ram_x / 8); // 32 bytes per row in ST7920
       int bit_index = 7 - (ram_x % 8);
-      
+
       if (byte_index < graphic_ram_size) {
         int pixel = (graphic_ram[byte_index] >> bit_index) & 1;
         file << (pixel ? "1" : "0") << " ";
@@ -255,7 +255,7 @@ void ST7920Device::save_lcd_capture(const std::string& prefix) {
     }
     file << "\n";
   }
-  
+
   file.close();
   std::cout << "LCD buffer saved: " << ss.str() << std::endl;
 }
@@ -267,103 +267,28 @@ void ST7920Device::check_capture_triggers() {
   static bool first_update_captured = false;
   static bool boot_capture_done = false;
   static bool status_capture_done = false;
-  
+
   auto current_time = std::chrono::steady_clock::now();
   auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time).count();
+
+  // Only capture at 5 and 15 seconds
+  static bool capture_5s_done = false;
+  static bool capture_15s_done = false;
   
-  // Capture first LCD update immediately  
-  if (!first_update_captured) {
-    save_lcd_capture("u8g2_first_update");
-    first_update_captured = true;
-    std::cout << "Auto-captured FIRST LCD UPDATE at " << elapsed_seconds << " seconds" << std::endl;
+  if (!capture_5s_done && elapsed_seconds >= 5) {
+    std::string prefix = "u8g2_5s_scan";
+    save_lcd_capture(prefix);
+    capture_5s_done = true;
+    std::cout << "Auto-captured 5s scan at " <<
+      std::chrono::duration_cast<std::chrono::duration<double>>(current_time - start_time).count() << " seconds" << std::endl;
   }
   
-  // Timer-based captures every 1 second for first 30 seconds
-  if (elapsed_seconds <= 30) {
-    auto timer_elapsed = std::chrono::duration_cast<std::chrono::seconds>(current_time - last_timer_capture).count();
-    if (timer_elapsed >= 1) {
-      std::string prefix = "u8g2_timer_" + std::to_string(elapsed_seconds) + "s";
-      save_lcd_capture(prefix);
-      last_timer_capture = current_time;
-      std::cout << "Timer-based capture " << elapsed_seconds << "s at " << 
-        std::chrono::duration_cast<std::chrono::duration<double>>(current_time - start_time).count() << " seconds" << std::endl;
-    }
+  if (!capture_15s_done && elapsed_seconds >= 15) {
+    std::string prefix = "u8g2_15s_scan";
+    save_lcd_capture(prefix);
+    capture_15s_done = true;
+    std::cout << "Auto-captured 15s scan at " <<
+      std::chrono::duration_cast<std::chrono::duration<double>>(current_time - start_time).count() << " seconds" << std::endl;
   }
-  
-  // Capture bootscreen transition at specific time (typically during 10s bootscreen)
-  if (!boot_capture_done && elapsed_seconds >= 23.0) {
-    save_lcd_capture("u8g2_23s_bootscreen");
-    boot_capture_done = true;
-    std::cout << "Auto-captured U8G2 boot screen at " << elapsed_seconds << " seconds (during bootscreen period)" << std::endl;
-  }
-  
-  // Capture status screen at 35 seconds (well after 10s bootscreen timeout)
-  if (!status_capture_done && elapsed_seconds >= 35.0) {
-    save_lcd_capture("u8g2_35s_status");
-    status_capture_done = true;
-    std::cout << "Auto-captured U8G2 status screen at " << elapsed_seconds << " seconds (after bootscreen timeout)" << std::endl;
-  }
-  
-  // Periodic captures every 10 seconds after status capture
-  if (status_capture_done) {
-    auto periodic_elapsed = std::chrono::duration_cast<std::chrono::seconds>(current_time - last_periodic_capture).count();
-    if (periodic_elapsed >= 10) {
-      save_lcd_capture("periodic");
-      last_periodic_capture = current_time;
-      std::cout << "Auto-captured periodic screen at " << elapsed_seconds << " seconds" << std::endl;
-    }
-  }
-  
-  // Additional captures for font bug analysis at key transition points
-  static bool capture_20s_done = false, capture_21s_done = false, capture_22s_done = false, capture_25s_done = false, capture_30s_done = false, capture_33s_done = false;
-  
-  // Granular captures every second from 0-20 seconds to catch bootscreen appearance
-  static bool captures_0_20_done[21] = {false}; // 0, 1, 2, ... 20 seconds
-  
-  for (int sec = 0; sec <= 20; sec++) {
-    if (!captures_0_20_done[sec] && elapsed_seconds >= sec) {
-      std::string prefix = "u8g2_" + std::to_string(sec) + "s_scan";
-      save_lcd_capture(prefix);
-      captures_0_20_done[sec] = true;
-      std::cout << "Auto-captured " << sec << "s scan at " << 
-        std::chrono::duration_cast<std::chrono::duration<double>>(current_time - start_time).count() << " seconds" << std::endl;
-    }
-  }
-  
-  // Capture as soon as LCD becomes active (first dirty update around 20s)
-  if (!capture_20s_done && elapsed_seconds >= 20.0) {
-    save_lcd_capture("u8g2_20s_first");
-    capture_20s_done = true;
-    std::cout << "Auto-captured first LCD update at " << elapsed_seconds << " seconds" << std::endl;
-  }
-  
-  if (!capture_21s_done && elapsed_seconds >= 21.0) {
-    save_lcd_capture("u8g2_21s_early");
-    capture_21s_done = true;
-    std::cout << "Auto-captured early transition at " << elapsed_seconds << " seconds" << std::endl;
-  }
-  
-  if (!capture_22s_done && elapsed_seconds >= 22.0) {
-    save_lcd_capture("u8g2_22s_transition");
-    capture_22s_done = true;
-    std::cout << "Auto-captured transition point at " << elapsed_seconds << " seconds" << std::endl;
-  }
-  
-  if (!capture_25s_done && elapsed_seconds >= 25.0) {
-    save_lcd_capture("u8g2_25s_mid");
-    capture_25s_done = true;
-    std::cout << "Auto-captured mid-period at " << elapsed_seconds << " seconds" << std::endl;
-  }
-  
-  if (!capture_30s_done && elapsed_seconds >= 30.0) {
-    save_lcd_capture("u8g2_30s_late");
-    capture_30s_done = true;
-    std::cout << "Auto-captured late transition at " << elapsed_seconds << " seconds" << std::endl;
-  }
-  
-  if (!capture_33s_done && elapsed_seconds >= 33.0) {
-    save_lcd_capture("u8g2_33s_final");
-    capture_33s_done = true;
-    std::cout << "Auto-captured final check at " << elapsed_seconds << " seconds" << std::endl;
-  }
+
 }
