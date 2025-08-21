@@ -32,6 +32,10 @@ public:
   void ui_init() override;
   void ui_widget() override;
 
+  // LCD capture functionality
+  void save_lcd_capture(const std::string& prefix);
+  void check_capture_triggers();
+
   static constexpr uint32_t width = 128, height = 64;
   bool render_integer_scaling = false, render_popout = false;
 
@@ -73,4 +77,6 @@ public:
 
   glm::ivec3 foreground_color = {0x81, 0xF2, 0xFF};
   glm::ivec3 background_color = {0x33, 0x01, 0xFC};
+
+  // LCD capture functionality
 };
