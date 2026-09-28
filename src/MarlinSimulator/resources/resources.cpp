@@ -26,10 +26,10 @@ namespace resource {
     m_modified = std::filesystem::last_write_time(m_path);
     std::streamsize size = file.tellg();
     file.seekg(0, std::ios::beg);
-    m_data.reserve(size + 1);
+    m_data.resize(size + 1);
     if (file.read(m_data.data(), size)) {
-      m_buffer = m_data.data();
-      m_data[size] = 0;
+      m_data[size] = '\0';
+      m_buffer = std::string_view(m_data.data(), static_cast<size_t>(size));
     } else {
       m_data.clear();
       m_buffer = {};

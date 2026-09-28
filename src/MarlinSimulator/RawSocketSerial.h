@@ -139,7 +139,7 @@ public:
         for (uint32_t i = 0; i < server.max_connections; ++i) {
           if (server.sockets[i] != nullptr) send(i);
         }
-        std::this_thread::sleep_for(std::chrono::nanoseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
         continue;
       }
 
