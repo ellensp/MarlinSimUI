@@ -6,6 +6,7 @@
 #include "application.h"
 #include "logger.h"
 #include "hardware/SDCard.h"
+#include "virtual_printer.h"
 #include "agent/agent_interface.h"
 #include "agent/request_log.h"
 #include "view_control.h"
@@ -60,6 +61,8 @@ Application::Application() {
           }
           ImGui::EndMenu();
         }
+        if (ImGui::MenuItem("Collapse Components List"))
+          VirtualPrinter::collapse_components_list();
         ImGui::EndMenu();
       }
       ImGui::EndMainMenuBar();

@@ -26,6 +26,8 @@ public:
     virtual void ui_init() {};
     virtual void ui_widget() {};
     virtual void ui_widgets();
+    bool ui_default_open() const;
+    void request_ui_collapse();
 
     /**
      * Emit this component's state as a JSON object for the agent interface.
@@ -89,6 +91,9 @@ public:
 
     std::shared_ptr<Component> parent;
     std::vector<std::shared_ptr<Component>> children;
+
+    bool ui_initial_open_applied = false;
+    bool ui_collapse_requested = false;
   };
 
   static void update() {
@@ -96,6 +101,7 @@ public:
   }
 
   static void ui_widgets();
+  static void collapse_components_list();
 
   // Serialize every registered component as {"<name>": {...}} for the agent
   // interface. Components that have not implemented serialize() report {}.

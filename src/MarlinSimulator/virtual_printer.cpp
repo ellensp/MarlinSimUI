@@ -41,6 +41,17 @@ std::shared_ptr<VirtualPrinter::Component> VirtualPrinter::root;
 void VirtualPrinter::Component::ui_widgets() {
   ui_widget();
   for(auto const& it : children) {
+    // Displays and the SD Card start open. "Collapse Components List" closes everything.
+    if (it->ui_collapse_requested) {
+      ImGui::SetNextItemOpen(false, ImGuiCond_Always);
+      it->ui_collapse_requested = false;
+      it->ui_initial_open_applied = true;
+    }
+    else if (!it->ui_initial_open_applied) {
+      if (it->ui_default_open()) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+      it->ui_initial_open_applied = true;
+    }
+
     if (ImGui::CollapsingHeader(it->name.c_str())) {
       ImGui::Indent(6.0f);
       ImGui::PushID(it->name.c_str());
@@ -49,6 +60,19 @@ void VirtualPrinter::Component::ui_widgets() {
       ImGui::Unindent(6.0f);
     }
   }
+}
+
+bool VirtualPrinter::Component::ui_default_open() const {
+  return name.find(" Display") != std::string::npos || name == "SD Card";
+}
+
+void VirtualPrinter::Component::request_ui_collapse() {
+  ui_collapse_requested = true;
+  for (auto const& it : children) it->request_ui_collapse();
+}
+
+void VirtualPrinter::collapse_components_list() {
+  if (root) root->request_ui_collapse();
 }
 
 void VirtualPrinter::Component::serialize(agent::JsonWriter& writer) const {
