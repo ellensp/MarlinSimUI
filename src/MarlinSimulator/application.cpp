@@ -5,6 +5,7 @@
 #include "user_interface.h"
 #include "application.h"
 #include "logger.h"
+#include "hardware/SDCard.h"
 #include "agent/agent_interface.h"
 #include "agent/request_log.h"
 #include "view_control.h"
@@ -19,6 +20,7 @@
 Application::Application() {
 
   window.init({.title = "Marlin Simulator"});
+  SDCard::register_imgui_settings();  // Before the ini is loaded, to restore the SD image path
   user_interface.init("imgui.ini");
 
   auto log_window = user_interface.addElement<LoggerWindow>("Log");

@@ -21,11 +21,22 @@
 
 class SDCard: public SPISlavePeripheral {
 public:
-  SDCard(SpiBus& spi_bus, pin_type cs, pin_type sd_detect = -1, bool sd_detect_state = true) : SPISlavePeripheral(spi_bus, cs), sd_detect(sd_detect), sd_detect_state(sd_detect_state), image_filename(SD_SIMULATOR_FAT_IMAGE) {
+  enum class ImgAuditStatus : uint8_t {
+    Passed,
+    Missing,
+    Corrupted
+  };
+
+  static void register_imgui_settings();
+  static const std::string& get_saved_image_filename();
+  static void set_saved_image_filename(const std::string& filename);
+
+  SDCard(SpiBus& spi_bus, pin_type cs, pin_type sd_detect = -1, bool sd_detect_state = true) : SPISlavePeripheral(spi_bus, cs), sd_detect(sd_detect), sd_detect_state(sd_detect_state), image_filename(get_saved_image_filename()) {
     if (Gpio::valid_pin(sd_detect)) {
       Gpio::attach(sd_detect, [this](GpioEvent& event){ this->interrupt(event); });
     }
-    sd_present = image_exists();
+    refresh_img_audit();
+    sd_present = img_audit_status == ImgAuditStatus::Passed;
     Gpio::set_pin_value(sd_detect, sd_present);
   }
   virtual ~SDCard() {};
@@ -34,14 +45,37 @@ public:
   const std::string file_dialog_key = "ChooseSDFileDlgKey";
   void ui_widget() {
     if (ImGui::Button("Select Image (FAT32)")) {
-      IGFD::FileDialogConfig config { "." };
+      IGFD::FileDialogConfig config { image_dialog_path(image_filename) };
       config.flags |= ImGuiFileDialogFlags_Modal;
       ImGuiFileDialog::Instance()->OpenDialog(file_dialog_key, "Choose File", "FAT32 Disk Image(*.img){.img},.*", config);
     }
-    if (ImGuiFileDialog::Instance()->Display(file_dialog_key, ImGuiWindowFlags_NoDocking))  {
+    ImVec4 file_dialog_bg = ImGui::GetStyleColorVec4(ImGuiCol_PopupBg);
+    file_dialog_bg.w = 1.0f;
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, file_dialog_bg);
+
+    if (ImGuiFileDialog::Instance()->IsOpened()) {
+      const ImGuiViewport* viewport = ImGui::GetMainViewport();
+      ImGui::SetNextWindowPos(
+        viewport->GetCenter(),
+        ImGuiCond_Appearing,
+        ImVec2(0.5f, 0.5f)
+      );
+    }
+
+    const bool file_dialog_done = ImGuiFileDialog::Instance()->Display(
+      file_dialog_key,
+      ImGuiWindowFlags_NoDocking,
+      ImVec2(900.0f, 600.0f)
+    );
+
+    ImGui::PopStyleColor();
+
+    if (file_dialog_done) {
       if (ImGuiFileDialog::Instance()->IsOk()) {
         image_filename = ImGuiFileDialog::Instance()->GetFilePathName();
-        sd_present = image_exists();
+        set_saved_image_filename(image_filename);
+        refresh_img_audit();
+        sd_present = img_audit_status == ImgAuditStatus::Passed;
         Gpio::set_pin_value(sd_detect, sd_present);
       }
       ImGuiFileDialog::Instance()->Close();
@@ -49,8 +83,15 @@ public:
 
     ImGui::Text("FileSystem image \"%s\" selected", image_filename.c_str());
     if (Gpio::valid_pin(sd_detect)) {
-      ImGui::Checkbox("SD Card Present ", (bool*)&sd_present);
+      bool requested_sd_present = sd_present;
+      if (ImGui::Checkbox("SD Card Present ", &requested_sd_present)) {
+        if (requested_sd_present) refresh_img_audit();
+        sd_present = requested_sd_present && img_audit_status == ImgAuditStatus::Passed;
+        Gpio::set_pin_value(sd_detect, sd_present);
+      }
+      ImGui::SameLine();
     }
+    draw_img_audit();
 
     if (!sd_present) {
       if (ImGui::Button("Generate Empty Image")) {
@@ -59,7 +100,8 @@ public:
           //confirm overwrite?
         } else {
           generate_empty_image(image_filename);
-          sd_present = image_exists();
+          refresh_img_audit();
+          sd_present = img_audit_status == ImgAuditStatus::Passed;
           Gpio::set_pin_value(sd_detect, sd_present);
         }
       }
@@ -75,8 +117,15 @@ public:
     }
   }
 
+  static FILE* fopen_utf8(const std::string& filename, const char* mode);
+  static std::string image_dialog_path(const std::string& filename);
+
+  ImgAuditStatus audit_image() const;
+  void refresh_img_audit();
+  void draw_img_audit() const;
+
   bool image_exists() {
-    auto image_fp = fopen(image_filename.c_str(), "rb+");
+    auto image_fp = fopen_utf8(image_filename, "rb+");
     if (image_fp == nullptr) {
       return false;
     }
@@ -88,6 +137,7 @@ public:
   int32_t currentArg = 0;
   uint8_t buf[1024];
   FILE *fp = nullptr;
+  ImgAuditStatus img_audit_status = ImgAuditStatus::Missing;
   bool sd_present = false;
   pin_type sd_detect;
   bool sd_detect_state = true;
