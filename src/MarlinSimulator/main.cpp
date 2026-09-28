@@ -71,6 +71,7 @@ struct CommandLineOptions {
 static void print_usage(const char* argv0) {
   printf("Usage: %s [options]\n\n", argv0);
   printf("  --serial-port <n>   TCP port for the raw G-code serial socket (default 8099)\n");
+  printf("                      (also settable via MARLIN_SIM_SERIAL_PORT)\n");
   printf("  --agent-port <n>    Enable the HTTP agent control interface on 127.0.0.1:<n>\n");
   printf("                      (also settable via MARLIN_SIM_AGENT_PORT)\n");
   printf("  --no-audio          Disable audio/buzzer emulation\n");
@@ -81,8 +82,16 @@ static void print_usage(const char* argv0) {
 
 // Returns false if the program should exit immediately.
 static bool parse_command_line(int argc, char** argv, CommandLineOptions& options) {
-  if (const char* env = getenv("MARLIN_SIM_AGENT_PORT"))
-    options.agent_port = uint16_t(strtoul(env, nullptr, 10));
+  // Environment defaults, overridden by the command line
+  auto env_port = [](const char* name, uint16_t& target) {
+    if (const char* env = getenv(name)) {
+      const unsigned long value = strtoul(env, nullptr, 10);
+      if (value > 0 && value <= 65535) target = uint16_t(value);
+      else fprintf(stderr, "%s: invalid port '%s' (ignored)\n", name, env);
+    }
+  };
+  env_port("MARLIN_SIM_SERIAL_PORT", options.serial_port);
+  env_port("MARLIN_SIM_AGENT_PORT", options.agent_port);
 
   for (int i = 1; i < argc; ++i) {
     const char* arg = argv[i];

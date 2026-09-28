@@ -84,8 +84,8 @@ Command-line options:
 
 | Option | Meaning |
 | --- | --- |
-| `--agent-port <n>` | Enable the agent interface on `127.0.0.1:<n>`. |
-| `--serial-port <n>` | TCP port for the raw G-code socket (default 8099). |
+| `--agent-port <n>` | Enable the agent interface on `127.0.0.1:<n>` (or `MARLIN_SIM_AGENT_PORT`). |
+| `--serial-port <n>` | TCP port for the raw G-code socket (default 8099, or `MARLIN_SIM_SERIAL_PORT`). |
 | `--no-audio` | Disable buzzer emulation. |
 | `--machine <type>` | Viewport printer model: `bedslinger`, `cube` or `delta`. |
 
