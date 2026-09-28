@@ -6,6 +6,7 @@
 
 #include <gl.h>
 #include "../renderer/renderer.h"
+#include "../renderer/imgui_sharp_bilinear.h"
 
 #include "../imgui_custom.h"
 
@@ -128,11 +129,10 @@ void ST7796Device::onByteReceived(uint8_t _byte) {
 void ST7796Device::ui_init() {
   renderer::gl_assert_call(glGenTextures, 1, &texture_id);
   renderer::gl_assert_call(glBindTexture, GL_TEXTURE_2D, texture_id);
-  renderer::gl_assert_call(glTexParameteri, GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  renderer::gl_assert_call(glTexParameteri, GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   renderer::gl_assert_call(glTexParameteri, GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   renderer::gl_assert_call(glTexParameteri, GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   renderer::gl_assert_call(glBindTexture, GL_TEXTURE_2D, 0);
+  renderer::imgui_sharp_bilinear::init(texture_id, render_integer_scaling);
 }
 
 void ST7796Device::ui_widget() {
@@ -143,7 +143,8 @@ void ST7796Device::ui_widget() {
 
   if (ImGui::BeginChild("ST7796Device", size)) {
     ImGui::GetCurrentWindow()->ScrollMax.y = 1.0f; // disable window scroll
-    ImGui::Checkbox("Integer Scaling", &render_integer_scaling);
+    if (ImGui::Checkbox("Integer Scaling", &render_integer_scaling))
+      renderer::imgui_sharp_bilinear::set_texture_filter(texture_id, render_integer_scaling);
     ImGui::Checkbox("Popout", &render_popout);
 
     if (render_popout) {
@@ -173,7 +174,7 @@ void ST7796Device::ui_widget() {
       size = imgui_custom::scale_proportionally(size, width, height, render_integer_scaling);
 
       const ImVec2 screen_pos = ImGui::GetCursorScreenPos();
-      ImGui::Image((ImTextureID)(intptr_t)texture_id, size, ImVec2(0,0), ImVec2(1,1));
+      renderer::imgui_sharp_bilinear::image(texture_id, size, render_integer_scaling);
 
       // Overlay an invisible button on the screen rect so press-drag-release is
       // captured by an ImGui *item*. ImGui::Image is not interactive, so a drag
