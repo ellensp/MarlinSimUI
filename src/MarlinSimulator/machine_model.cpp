@@ -10,6 +10,9 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <src/inc/MarlinConfig.h>
+#if HAS_BED_PROBE
+  #include <src/module/probe.h> // probe.offset (M851)
+#endif
 
 #include "hardware/KinematicSystem.h" // hotend_offset_mm
 
@@ -42,6 +45,7 @@ namespace color {
   constexpr glm::vec4 brass   { 0.85f, 0.65f, 0.25f, 1.0f }; // Nozzle
   constexpr glm::vec4 screw   { 0.45f, 0.46f, 0.50f, 1.0f }; // Lead screws
   constexpr glm::vec4 joint   { 0.62f, 0.63f, 0.66f, 1.0f }; // Ball joints
+  constexpr glm::vec4 probe   { 0.20f, 0.55f, 0.90f, 1.0f }; // Bed probe body (stands out from the head)
 }
 
 //
@@ -143,24 +147,38 @@ static void add_hotend_cold(VertexBuffer& buf, const glm::vec3 at) {
 static void move_to(renderer::Mesh& m, const glm::vec3 pos) { m.m_position = pos; }
 
 //
-// Hotends on one carriage, one per HOTEND at motion.hotend_offset (M218 / EEPROM), read via
+// Hotends on the carriage(s), one per HOTEND at motion.hotend_offset (M218 / EEPROM), read via
 // hotend_offset_mm() in KinematicSystem.cpp, which also puts each extruder's nozzle there.
-// IDEX has a second carriage, which isn't modeled yet, so it draws one hotend.
+//
+// IDEX (DUAL_X_CARRIAGE): Marlin puts T0 on the X1 carriage and every other tool on the X2
+// carriage (X_APPLY_STEP drives X2 whenever the moving extruder isn't 0). hotend_offset[1].x is
+// the X2 home position rather than an offset, and tool changes zero the X difference, so the
+// X2 tools share one X and differ only by their Y/Z offsets, which are relative to T0.
 //
 int MachineModel::hotend_count() {
-  #if HOTENDS == 0 || ENABLED(DUAL_X_CARRIAGE)
+  #if HOTENDS == 0
     return 1;
   #else
     return std::min(HOTENDS, max_hotends);
   #endif
 }
 
-// Live offset of hotend h from hotend 0, Marlin XYZ -> GL (x, z, -y). A +Z offset raises the nozzle.
+int MachineModel::carriage_count() { return ENABLED(DUAL_X_CARRIAGE) ? 2 : 1; }
+
+int MachineModel::carriage_of(const int h) { return ENABLED(DUAL_X_CARRIAGE) && h > 0 ? 1 : 0; }
+
+// Live offset of hotend h from its carriage origin, Marlin XYZ -> GL (x, z, -y). A +Z offset
+// raises the nozzle. The X1 origin is the T0 nozzle; the X2 origin is the X2 nozzle X at T0's Y/Z.
 glm::vec3 MachineModel::live_hotend_offset(const int h) {
-  #if HOTENDS > 1 && DISABLED(DUAL_X_CARRIAGE)
+  #if HOTENDS > 1
     if (h > 0 && h < hotend_count()) {
-      const glm::vec3 d = hotend_offset_mm(h) - hotend_offset_mm(0);
-      return { d.x, d.z, -d.y };
+      #if ENABLED(DUAL_X_CARRIAGE)
+        const glm::vec3 o = hotend_offset_mm(h);
+        return { 0, o.z, -o.y };
+      #else
+        const glm::vec3 d = hotend_offset_mm(h) - hotend_offset_mm(0);
+        return { d.x, d.z, -d.y };
+      #endif
     }
   #else
     UNUSED(h);
@@ -168,21 +186,49 @@ glm::vec3 MachineModel::live_hotend_offset(const int h) {
   return {};
 }
 
-// The parts are built for the offsets at build time. When M218, M501 or the LCD
-// changes an offset the model must be rebuilt (Visualisation::update checks each frame).
-bool MachineModel::hotend_layout_changed() const {
-  for (int h = 1; h < hotend_count(); ++h)
-    if (live_hotend_offset(h) != hotend_layout[h]) return true;
-  return false;
+//
+// Bed probe, at Marlin's probe.offset (NOZZLE_TO_PROBE_OFFSET, M851, EEPROM) from the nozzle.
+// This is the offset Marlin plans with, so the probe lines up with the mesh points during G29.
+//
+bool MachineModel::has_probe() { return ENABLED(HAS_BED_PROBE) && DISABLED(NOZZLE_AS_PROBE); }
+
+glm::vec3 MachineModel::live_probe_offset() {
+  #if HAS_BED_PROBE && DISABLED(NOZZLE_AS_PROBE)
+    return { float(probe.offset.x), float(probe.offset.z), -float(probe.offset.y) };
+  #else
+    return {};
+  #endif
 }
 
-// Carriage-local extent of the hotends' tips, to size the carriage around them
-void MachineModel::hotend_extent(glm::vec3& lo, glm::vec3& hi) const {
+// The parts are built for the offsets at build time. When M218, M851, M501 or the LCD
+// changes an offset the model must be rebuilt (Visualisation::update checks each frame).
+bool MachineModel::layout_changed() const {
+  for (int h = 1; h < hotend_count(); ++h)
+    if (live_hotend_offset(h) != hotend_layout[h]) return true;
+  return has_probe() && live_probe_offset() != probe_layout;
+}
+
+// Carriage-local extent of the hotends' tips on one carriage (-1 = all), to size the carriage around them
+void MachineModel::hotend_extent(glm::vec3& lo, glm::vec3& hi, const int carriage) const {
+  bool first = true;
   lo = hi = {};
-  for (int h = 1; h < hotend_count(); ++h) {
-    lo = glm::min(lo, hotend_offset(h));
-    hi = glm::max(hi, hotend_offset(h));
+  for (int h = 0; h < hotend_count(); ++h) {
+    if (carriage >= 0 && carriage_of(h) != carriage) continue;
+    const glm::vec3 o = hotend_offset(h);
+    lo = first ? o : glm::min(lo, o);
+    hi = first ? o : glm::max(hi, o);
+    first = false;
   }
+}
+
+// X range the nozzles travel. IDEX parks X1 at X_MIN_POS and X2 at its endstop, which is
+// usually well past the bed, so the X axis is built to reach both.
+void MachineModel::x_travel(float& lo, float& hi) const {
+  lo = 0; hi = X_BED_SIZE;
+  #if ENABLED(DUAL_X_CARRIAGE)
+    lo = std::min(lo, float(X1_MIN_POS));
+    hi = std::max(hi, dxc_x2_endstop());
+  #endif
 }
 
 //
@@ -268,22 +314,46 @@ renderer::mesh_id_t MachineModel::add_part(Geometry geometry, Animate animate, c
   return id;
 }
 
-// Every hotend's cold end (heat break + heatsink), baked into the carriage / effector part
-void MachineModel::add_cold_ends(VertexBuffer& b) const {
-  for (int h = 0; h < hotend_count(); ++h) add_hotend_cold(b, hotend_offset(h));
+// Every hotend's cold end (heat break + heatsink) on one carriage, baked into that carriage / effector part
+void MachineModel::add_cold_ends(VertexBuffer& b, const int carriage) const {
+  for (int h = 0; h < hotend_count(); ++h)
+    if (carriage_of(h) == carriage) add_hotend_cold(b, hotend_offset(h));
 }
 
-// One heater block + nozzle per hotend, each following the nozzle at its offset.
+// One heater block + nozzle per hotend, each following its carriage's nozzle at its offset.
 // Each has its own tint and glow uniforms, updated per frame by set_hotend_look().
 void MachineModel::add_hot_parts() {
   for (int h = 0; h < hotend_count(); ++h) {
     const glm::vec3 offset = hotend_offset(h);
+    const bool on_x2 = carriage_of(h) == 1;
     const auto id = add_part([](VertexBuffer& b) { add_hotend_hot(b); },
-      [offset](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world + offset); }, false);
+      [offset, on_x2](renderer::Mesh& m, const MachinePose& p) { move_to(m, (on_x2 ? p.x2_world : p.nozzle_world) + offset); }, false);
     auto mesh = renderer::get_mesh_by_id(id);
     mesh->m_shader_instance->set_uniform("u_tint", &hotend_tint[h]);
     mesh->m_shader_instance->set_uniform("u_glow", &hotend_glow[h]);
   }
+}
+
+//
+// Bed probe on the X1 carriage / effector: a 6mm cylinder whose tip is the trigger point at
+// probe.offset from the T0 nozzle, so during G29 it sits right over each mesh point. A bracket
+// joins its top to the carriage, using 'nearest' to find the closest carriage point (carriage-
+// local XZ) and holding the bracket within the carriage's height range [mount_lo, mount_hi].
+// A stowed BLTouch pulls its body probe_stow_raise up into the bracket.
+//
+void MachineModel::add_probe(std::function<glm::vec2(glm::vec2)> nearest, const float mount_lo, const float mount_hi) {
+  if (!has_probe()) return;
+  const glm::vec3 tip = probe_layout;
+  const float top = tip.y + probe_length;                        // Body top when deployed; stowed, it rises through the bracket
+  const float by = std::clamp(top, mount_lo, std::max(mount_lo, mount_hi - 4));
+  add_part([=](VertexBuffer& b) {
+    const glm::vec2 p { tip.x, tip.z }, c = nearest(p);
+    const glm::vec2 lo = glm::min(p, c) - 5.0f, hi = glm::max(p, c) + 5.0f;
+    add_box(b, {lo.x, by, lo.y}, {hi.x, by + 4, hi.y}, color::printed);
+  }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); }, false);
+  add_part([=](VertexBuffer& b) {
+    add_cylinder(b, tip, tip + glm::vec3(0, probe_length, 0), probe_radius, color::probe, 16);
+  }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world + glm::vec3(0, p.probe_raise, 0)); }, false);
 }
 
 void MachineModel::set_hotend_look(const int h, const glm::vec4 tint, const float glow) {
@@ -297,6 +367,7 @@ void MachineModel::build(const MachineType new_type, std::shared_ptr<renderer::S
   type = new_type;
   program = shader;
   for (int h = 0; h < max_hotends; ++h) hotend_layout[h] = live_hotend_offset(h);
+  probe_layout = live_probe_offset();
   bounds_min = glm::vec3(0, 0, -bed_y);
   bounds_max = glm::vec3(bed_x, bed_z, 0);
   switch (type) {
@@ -321,8 +392,8 @@ void MachineModel::set_visible(const bool vis) {
     if (auto mesh = renderer::get_mesh_by_id(part.mesh)) mesh->m_visible = vis;
 }
 
-// Where the bed and nozzle are for a given nozzle position
-MachinePose MachineModel::pose(const glm::vec3 nozzle) const {
+// Where the bed and nozzle(s) are for a given T0 nozzle position (and, for IDEX, the X2 nozzle X)
+MachinePose MachineModel::pose(const glm::vec3 nozzle, const float x2) const {
   MachinePose p;
   p.nozzle = nozzle;
   switch (type) {
@@ -342,6 +413,8 @@ MachinePose MachineModel::pose(const glm::vec3 nozzle) const {
     default: break; // Delta: the bed is fixed
   }
   p.nozzle_world = glm::vec3(nozzle.x, nozzle.z, -nozzle.y) + p.bed_offset;
+  // The X2 carriage rides the same rods, so only its X differs from the X1 carriage origin
+  p.x2_world = { x2 + p.bed_offset.x, p.nozzle_world.y, p.nozzle_world.z };
   return p;
 }
 
@@ -381,8 +454,11 @@ void MachineModel::build_bedslinger() {
 
   // Frame: two side frames, each a Y base leg with the Z upright standing on it,
   // joined by front/back base cross members and the top bar. Everything is placed
-  // from the bed size and Z height, so the printer follows the config.
-  const float xl = -rod_clear - screw_gap - motor * 0.5f - 25, xr = bed_x - xl; // Frame outer edges
+  // from the bed size, X travel (IDEX parks X2 past the bed) and Z height, so the printer follows the config.
+  float tx0, tx1;
+  x_travel(tx0, tx1);
+  constexpr float side = rod_clear + screw_gap + motor * 0.5f + 25;  // Frame outer edge to the X travel
+  const float xl = tx0 - side, xr = tx1 + side;       // Frame outer edges
   const float leg[2] = { xl, xr - w };                // Left edge of each side frame
   // Z motors and screws are centered on the uprights; the Z rods are just inboard
   const float screw[2] = { leg[0] + w * 0.5f, leg[1] + w * 0.5f };
@@ -444,22 +520,37 @@ void MachineModel::build_bedslinger() {
     }
     add_cylinder(b, {rod[0], xrod_lo, xrod_z}, {rod[1], xrod_lo, xrod_z}, 4, color::rod);
     add_cylinder(b, {rod[0], xrod_hi, xrod_z}, {rod[1], xrod_hi, xrod_z}, 4, color::rod);
-    // X motor on the left X end, outboard of the Z screw, 2cm behind the X rod plane
-    add_block(b, {screw[0] - 14, (xrod_lo + xrod_hi) * 0.5f, xrod_z - 10 + motor * 0.5f}, {motor, motor, motor}, color::dark);
+    // X motor on the left X end, outboard of the Z screw, 2cm behind the X rod plane.
+    // IDEX drives the X2 carriage with its own motor on the right X end.
+    for (int s = 0; s < carriage_count(); ++s) {
+      const float in = s ? -1.0f : 1.0f;
+      add_block(b, {screw[s] - in * 14, (xrod_lo + xrod_hi) * 0.5f, xrod_z - 10 + motor * 0.5f}, {motor, motor, motor}, color::dark);
+    }
   }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, {0, p.nozzle_world.y, 0}); });
 
-  // X carriage and the hotends' cold ends, which follow the nozzle.
-  // The carriage plate spans all the hotends and sits just behind the rearmost one.
-  add_part([&](VertexBuffer& b) {
+  // X carriage(s) and the hotends' cold ends, which follow their nozzles.
+  // Each carriage plate spans its own hotends and sits just behind the rearmost hotend
+  // of either carriage, so both plates ride the same X rods.
+  glm::vec3 all_lo, all_hi;
+  hotend_extent(all_lo, all_hi);
+  const float plate_front = all_lo.z - 10;
+  for (int c = 0; c < carriage_count(); ++c) {
     glm::vec3 lo, hi;
-    hotend_extent(lo, hi);
-    const float plate_front = lo.z - 10;
-    add_box(b, {lo.x - 25, lo.y + 18, lo.z - 34}, {hi.x + 25, hi.y + 88, plate_front}, color::printed);
-    add_cold_ends(b);
-    // Hotends in front of the rearmost one hang from a nozzle holder: one block reaching
-    // forward from the plate at the top of the heatsinks, spanning every hotend in X
-    if (hi.z > lo.z) add_box(b, {lo.x - 12, lo.y + 38, plate_front}, {hi.x + 12, hi.y + 48, hi.z + 12}, color::printed);
-  }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); }, false);
+    hotend_extent(lo, hi, c);
+    add_part([&](VertexBuffer& b) {
+      add_box(b, {lo.x - 25, lo.y + 18, all_lo.z - 34}, {hi.x + 25, hi.y + 88, plate_front}, color::printed);
+      add_cold_ends(b, c);
+      // Hotends in front of the rearmost one hang from a nozzle holder: one block reaching
+      // forward from the plate at the top of the heatsinks, spanning every hotend in X
+      if (hi.z > all_lo.z) add_box(b, {lo.x - 12, lo.y + 38, plate_front}, {hi.x + 12, hi.y + 48, hi.z + 12}, color::printed);
+    }, c ? Animate([](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.x2_world); })
+         : Animate([](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); }), false);
+    // The probe hangs from the X1 carriage plate, bracketed to its nearest point
+    if (c == 0) {
+      const glm::vec2 plo { lo.x - 25, all_lo.z - 34 }, phi { hi.x + 25, plate_front };
+      add_probe([=](const glm::vec2 q) { return glm::clamp(q, plo, phi); }, lo.y + 18, hi.y + 88);
+    }
+  }
   add_hot_parts();
 }
 
@@ -471,11 +562,13 @@ void MachineModel::build_cube() {
   constexpr float motor = 42;                         // NEMA17 body
   constexpr float rod_r = 4;                          // 8mm rods
   constexpr float zrod_r = 6, zscrew_r = 5;           // 12mm Z rods, 10mm Z lead screw
-  const float x0 = -60, x1 = bed_x + 60, y0 = -60, y1 = bed_z + 110, z0 = -bed_y - 60, z1 = 60;
+  float tx0, tx1;
+  x_travel(tx0, tx1);                                 // IDEX parks X2 past the bed, so the gantry reaches it
+  const float x0 = tx0 - 60, x1 = tx1 + 60, y0 = -60, y1 = bed_z + 110, z0 = -bed_y - 60, z1 = 60;
   const float top = bed_z + 55;                       // Y rail height
   const float xrod_y = top + 15;                      // X rods, side by side, above the Y rails
   constexpr float xrod_dz = 14;                       // X rods in front of / behind the carriage center
-  const float yrail[2] = { -30, bed_x + 30 };
+  const float yrail[2] = { tx0 - 30, tx1 + 30 };
   const float in_face[2] = { x0 + w, x1 - w };        // Inner faces of the left / right frame sides
   const float zr = z0 + w + 10;                       // Z rods and screw, just in front of the back frame
   const float zrod_top = y1 - 4;                      // Z rods end inside their top mounts
@@ -535,13 +628,25 @@ void MachineModel::build_cube() {
     }
   }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, {0, 0, p.nozzle_world.z}); });
 
-  // Toolhead, which follows the nozzle (at the top of the bed travel), enclosing every hotend's heatsink
-  add_part([&](VertexBuffer& b) {
+  // Toolhead(s), which follow their nozzles (at the top of the bed travel), each enclosing its hotends' heatsinks.
+  // With IDEX both toolheads ride the same X rods, so each spans the depth of every hotend.
+  glm::vec3 all_lo, all_hi;
+  hotend_extent(all_lo, all_hi);
+  for (int c = 0; c < carriage_count(); ++c) {
     glm::vec3 lo, hi;
-    hotend_extent(lo, hi);
-    add_box(b, {lo.x - 28, lo.y + 30, lo.z - 28}, {hi.x + 28, hi.y + 85, hi.z + 28}, color::printed);
-    add_cold_ends(b);
-  }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); }, false);
+    hotend_extent(lo, hi, c);
+    const glm::vec3 blo { lo.x - 28, lo.y + 30, all_lo.z - 28 }, bhi { hi.x + 28, hi.y + 85, all_hi.z + 28 };
+    add_part([&](VertexBuffer& b) {
+      add_box(b, blo, bhi, color::printed);
+      add_cold_ends(b, c);
+    }, c ? Animate([](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.x2_world); })
+         : Animate([](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); }), false);
+    // The probe mounts to the side of the X1 toolhead nearest to it
+    if (c == 0) {
+      const glm::vec2 plo { blo.x, blo.z }, phi { bhi.x, bhi.z };
+      add_probe([=](const glm::vec2 q) { return glm::clamp(q, plo, phi); }, blo.y, bhi.y);
+    }
+  }
   add_hot_parts();
 }
 
@@ -653,5 +758,8 @@ void MachineModel::build_delta() {
     }
     add_cold_ends(b);
   }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); }, false);
+  // The probe mounts to the effector plate's rim
+  const float rim = effector_r + 8;
+  add_probe([=](const glm::vec2 q) { const float l = glm::length(q); return l > rim ? q * (rim / l) : q; }, joint_y - 5, joint_y + 5);
   add_hot_parts();
 }

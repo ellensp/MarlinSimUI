@@ -26,6 +26,8 @@ struct MachinePose {
   glm::vec3 nozzle_world {};  // Nozzle position in world GL coordinates
   bool has_towers = false;    // Delta: 'towers' holds the simulated carriage heights
   glm::vec3 towers {};        // Delta: carriage heights (A, B, C) from the tower steppers
+  glm::vec3 x2_world {};      // IDEX: origin of the X2 carriage (its X, the X1 nozzle's height and depth)
+  float probe_raise = 0;      // Bed probe lift above its deployed position (BLTouch stowed)
 };
 
 // Delta geometry, from the Marlin config (DELTA_RADIUS, DELTA_DIAGONAL_ROD,
@@ -49,17 +51,26 @@ public:
   void build(const MachineType type, std::shared_ptr<renderer::ShaderProgram> program);
   void destroy();
 
-  MachinePose pose(const glm::vec3 nozzle) const;  // Nozzle in Marlin coordinates
+  MachinePose pose(const glm::vec3 nozzle, const float x2 = 0) const;  // Nozzle in Marlin coordinates; IDEX: X2 nozzle X
   void update(const MachinePose& pose);
   void queue_render() const;                        // Add all parts to the render list
   void set_visible(const bool visible);
 
-  // Hotends drawn on the carriage / effector, one per HOTEND at motion.hotend_offset
+  // Hotends drawn on the carriage(s) / effector, one per HOTEND at motion.hotend_offset.
+  // IDEX: T0 rides the X1 carriage and every other tool rides the X2 carriage, as in Marlin.
   static constexpr int max_hotends = 8;
   static int hotend_count();
-  static glm::vec3 live_hotend_offset(const int h);  // GL offset of hotend h from hotend 0, now
+  static int carriage_count();                       // 2 with DUAL_X_CARRIAGE, else 1
+  static int carriage_of(const int h);               // Carriage carrying hotend h
+  static glm::vec3 live_hotend_offset(const int h);  // GL offset of hotend h from its carriage origin, now
   glm::vec3 hotend_offset(const int h) const { return h > 0 && h < max_hotends ? hotend_layout[h] : glm::vec3(); } // As built
-  bool hotend_layout_changed() const;                // M218 / EEPROM moved a hotend: rebuild
+  bool layout_changed() const;                       // M218 / M851 / EEPROM moved a hotend or the probe: rebuild
+
+  // Bed probe drawn on the (X1) carriage at the M851 offset (HAS_BED_PROBE, not NOZZLE_AS_PROBE).
+  // A 6mm cylinder with its tip at the trigger point; a stowed BLTouch rides probe_stow_raise higher.
+  static bool has_probe();
+  static glm::vec3 live_probe_offset();              // GL offset of the probe tip from the nozzle, now
+  static constexpr float probe_radius = 3, probe_length = 36, probe_stow_raise = 7;
 
   // Per-frame look of hotend h's heater block and nozzle, applied by the lit shader:
   // tint.rgb blended in by tint.a, plus a 'glow' brightness for the active hotend.
@@ -81,11 +92,16 @@ private:
   };
 
   renderer::mesh_id_t add_part(Geometry geometry, Animate animate = nullptr, const bool in_bounds = true);
-  // Shared by every printer type: the carriage / effector part calls add_cold_ends and
+  // Shared by every printer type: each carriage / effector part calls add_cold_ends and
   // sizes itself with hotend_extent; add_hot_parts adds the tintable heater blocks.
-  void hotend_extent(glm::vec3& lo, glm::vec3& hi) const;
-  void add_cold_ends(renderer::Buffer<renderer::vertex_data_t>& b) const;
+  // carriage = -1 takes the extent of every hotend on every carriage.
+  void hotend_extent(glm::vec3& lo, glm::vec3& hi, const int carriage = -1) const;
+  void add_cold_ends(renderer::Buffer<renderer::vertex_data_t>& b, const int carriage = 0) const;
   void add_hot_parts();  // Heater block + nozzle of every hotend, each its own tintable mesh
+  // Bed probe (X1 carriage / effector): a bracket from the part's nearest point (carriage-local XZ)
+  // at a height within [mount_lo, mount_hi], and the body, lifted by pose.probe_raise
+  void add_probe(std::function<glm::vec2(glm::vec2)> nearest, const float mount_lo, const float mount_hi);
+  void x_travel(float& lo, float& hi) const;  // X range the carriage(s) can reach, for sizing the X axis
   void build_bedslinger();
   void build_cube();
   void build_delta();
@@ -100,4 +116,5 @@ private:
   glm::vec4 hotend_tint[max_hotends] {};
   float hotend_glow[max_hotends] {};
   glm::vec3 hotend_layout[max_hotends] {};  // hotend_offset(h) when the parts were built
+  glm::vec3 probe_layout {};                // live_probe_offset() when the parts were built
 };

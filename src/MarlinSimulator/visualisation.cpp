@@ -20,6 +20,12 @@
 #include <src/module/temperature.h> // Heater targets, which set the full-pink point
 
 #include "hardware/Heater.h"
+#if ENABLED(BLTOUCH)
+  #include "hardware/print_bed.h"
+  #include "hardware/bed_probe.h"
+  #include "hardware/pwm_reader.h"
+  #include "hardware/BLTouch.h"
+#endif
 
 // Prevent glm::abs confusion
 #undef abs
@@ -311,17 +317,24 @@ void Visualisation::update() {
   // Printer model: place the bed and moving parts for the current nozzle position.
   // M218, M501 (EEPROM) etc. can move a hotend, so rebuild the parts to match.
   //
-  if (machine.hotend_layout_changed()) {
+  if (machine.layout_changed()) {
     machine.build(machine.type, lit_program);
     machine.set_visible(show_machine);
     render_list_dirty = true;
   }
   const glm::vec3 nozzle { effector_pos.x, -effector_pos.z, effector_pos.y }; // Back to Marlin XYZ
-  MachinePose pose = machine.pose(nozzle);
+  // IDEX: the X2 carriage's nozzle X, from the first tool it carries
+  const float x2 = MachineModel::carriage_count() > 1 && extrusion.size() > 1 ? extrusion[1].position.x : 0.0f;
+  MachinePose pose = machine.pose(nozzle, x2);
   if (!show_machine) {
     pose.bed_offset = {};
     pose.nozzle_world = glm::vec3(effector_pos);
   }
+  #if ENABLED(BLTOUCH)
+    // A stowed BLTouch pulls its pin up, so the probe rides higher until the servo deploys it
+    if (auto bltouch = virtual_printer.get_component<BLTouchProbe>("BLTouch"); bltouch && !bltouch->deployed())
+      pose.probe_raise = MachineModel::probe_stow_raise;
+  #endif
   if (machine.type == MACHINE_DELTA) {
     // Delta tower steppers are linear, so they give the carriage heights directly
     if (auto delta = virtual_printer.get_component<DeltaKinematicSystem>("Delta Kinematic System")) {

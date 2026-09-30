@@ -33,6 +33,7 @@ public:
 
   void interrupt(GpioEvent& ev);
 
+  bool deployed() const { return m_deployed; } // From the servo signal: the pin is down
 private:
   bool m_deployed = false;
   pin_type m_servo_pin;

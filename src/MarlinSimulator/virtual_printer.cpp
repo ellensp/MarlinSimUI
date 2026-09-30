@@ -265,12 +265,9 @@ void VirtualPrinter::build() {
     #else
       root->add_component<EndStop>("Endstop(X Max)", X_MAX_PIN, !X_MAX_ENDSTOP_HIT_STATE, [kinematics](){ return kinematics->state.effector_position[0].position.x >= X_MAX_POS; });
     #endif
-    #ifdef DUAL_X_CARRIAGE
-      #if X_HOME_DIR < 0
-        root->add_component<EndStop>("Endstop(X2 Min)", X2_MIN_PIN, !X2_MIN_ENDSTOP_HIT_STATE, [kinematics](){ return kinematics->state.effector_position[1].position.x <= X2_MIN_POS; });
-      #else
-        root->add_component<EndStop>("Endstop(X2 Max)", X2_MAX_PIN, !X2_MAX_ENDSTOP_HIT_STATE, [kinematics](){ return kinematics->state.effector_position[1].position.x >= X2_MAX_POS; });
-      #endif
+    #if ENABLED(DUAL_X_CARRIAGE)
+      // IDEX homes X2 to X max (X_HOME_DIR must be -1), on the X_MAX_PIN switch.
+      root->add_component<EndStop>("Endstop(X2 Max)", X_MAX_PIN, !X_MAX_ENDSTOP_HIT_STATE, [kinematics](){ return kinematics->state.effector_position[1].position.x >= dxc_x2_endstop(); });
     #endif
     #if Y_HOME_DIR < 0
       root->add_component<EndStop>("Endstop(Y Min)", Y_MIN_PIN, !Y_MIN_ENDSTOP_HIT_STATE, [kinematics](){ return kinematics->state.effector_position[0].position.y <= Y_MIN_POS; });

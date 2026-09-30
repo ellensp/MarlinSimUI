@@ -24,6 +24,12 @@ struct kinematic_state {
 // Nozzle offset of hotend h in Marlin XYZ mm (motion.hotend_offset, so M218 / EEPROM apply)
 glm::vec3 hotend_offset_mm(const size_t h);
 
+#if ENABLED(DUAL_X_CARRIAGE)
+  // IDEX: X position of the X2 carriage's (X max) endstop. Marlin homes X2 there and
+  // calls it hotend_offset[1].x, which defaults to the larger of X2_HOME_POS and X2_MAX_POS.
+  constexpr float dxc_x2_endstop() { return (X2_HOME_POS) > (X2_MAX_POS) ? (X2_HOME_POS) : (X2_MAX_POS); }
+#endif
+
 class KinematicSystem : public VirtualPrinter::Component {
 public:
   KinematicSystem(std::function<void(kinematic_state&)> on_kinematic_update) :  VirtualPrinter::Component("Kinematic System"), on_kinematic_update(on_kinematic_update) {};

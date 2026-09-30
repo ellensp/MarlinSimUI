@@ -199,12 +199,10 @@ CartesianKinematicSystem::CartesianKinematicSystem(std::function<void(kinematic_
     (rand() % (int)((Z_MAX_POS / 8) - Z_MIN_POS)) + Z_MIN_POS
   });
 
-  #ifdef DUAL_X_CARRIAGE
-    hardware_offset.push_back(glm::vec3{
-      (rand() % (int)((X2_MAX_POS / 4) - (hardware_offset[0].x + X2_MIN_POS))) + (hardware_offset[0].x + X2_MIN_POS),
-      hardware_offset[0].y,
-      hardware_offset[0].z
-    });
+  #if ENABLED(DUAL_X_CARRIAGE)
+    // The second carriage powers up somewhere short of its (X max) endstop.
+    // It shares Y and Z with the first carriage, so only X is used.
+    hardware_offset.push_back(glm::vec3{ dxc_x2_endstop() - 10 - rand() % 40, 0, 0 });
   #endif
 
 }
@@ -250,14 +248,21 @@ void CartesianKinematicSystem::kinematic_update() {
   for (size_t i = 0; i < EXTRUDERS; ++i) {
     state.effector_position[i] = {carriage, glm::vec4(hardware_offset[0] + hotend_offset_mm(0), 0.0f) + glm::vec4(carriage, extruder[i]), filament_color[i]};
   }
-#elif defined(DUAL_X_CARRIAGE)
-  auto carriage2 = glm::vec3{
+#elif ENABLED(DUAL_X_CARRIAGE)
+  // IDEX: T0 rides the X carriage, and every other tool rides the X2 carriage, as in Marlin
+  // (X_APPLY_STEP drives X2 for any extruder but 0). Both carriages share Y and Z. Marlin uses
+  // hotend_offset[1].x as the X2 home position, not an offset, so X2 tools only take Y/Z offsets.
+  const glm::vec3 carriage2 {
     std::static_pointer_cast<StepperDriver>(steppers[AxisIndex::X2])->steps() / steps_per_unit[0] * (((INVERT_X2_DIR * 2) - 1) * -1.0),
     carriage.y,
     carriage.z
   };
+  const glm::vec3 base2 { hardware_offset[1].x, hardware_offset[0].y, hardware_offset[0].z };
   state.effector_position[0] = {carriage, glm::vec4(hardware_offset[0], 0.0f) + glm::vec4(carriage, extruder[0]), filament_color[0]};
-  state.effector_position[1] = {carriage2, glm::vec4(hardware_offset[1], 0.0f) + glm::vec4(carriage2, extruder[1]), filament_color[1]};
+  for (size_t i = 1; i < EXTRUDERS; ++i) {
+    const glm::vec3 yz { 0, i < HOTENDS ? hotend_offset_mm(i).y : 0.0f, i < HOTENDS ? hotend_offset_mm(i).z : 0.0f };
+    state.effector_position[i] = {carriage2, glm::vec4(base2 + yz, 0.0f) + glm::vec4(carriage2, extruder[i]), filament_color[i]};
+  }
 #else
   for (size_t i = 0; i < HOTENDS; ++i) {
     state.effector_position[i] = {carriage, glm::vec4(hardware_offset[0], 0.0f) + glm::vec4(hotend_offset_mm(i), 0.0f) + glm::vec4(carriage, extruder[i]), filament_color[i]};
@@ -276,9 +281,9 @@ void CartesianKinematicSystem::ui_widget() {
       kinematic_update();
     }
 
-    #if defined(DUAL_X_CARRIAGE) && EXTRUDERS > 1
+    #if ENABLED(DUAL_X_CARRIAGE)
       value = state.effector_position[1].position.x;
-      if (ImGui::SliderFloat("X2 Position(mm)", &value, X2_MIN_POS, X2_MAX_POS)) {
+      if (ImGui::SliderFloat("X2 Position(mm)", &value, X2_MIN_POS, dxc_x2_endstop())) {
         hardware_offset[1].x = value - state.effector_position[1].stepper_position.x;
         kinematic_update();
       }
