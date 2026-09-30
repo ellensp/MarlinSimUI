@@ -6,7 +6,11 @@
 #include "../agent/json.h"
 
 #include <src/inc/MarlinConfig.h>
+#include "../scara_frame.h"
 #include <src/module/motion.h> // motion.hotend_offset
+#if HAS_BED_PROBE
+  #include <src/module/probe.h> // probe.offset (M851)
+#endif
 
 constexpr float steps_per_unit[] = DEFAULT_AXIS_STEPS_PER_UNIT;
 constexpr bool extruder_invert_dir[EXTRUDERS] = {
@@ -97,11 +101,13 @@ void KinematicSystem::serialize(agent::JsonWriter& writer) const {
   // makes the agent interface useful for bug hunting.
   writer.begin_object();
 
+  const glm::vec3 w = world_from_native;   // Reported in Marlin's frame
+
   writer.key("position");
   writer.begin_object();
-  writer.member("x", state.position.x);
-  writer.member("y", state.position.y);
-  writer.member("z", state.position.z);
+  writer.member("x", state.position.x - w.x);
+  writer.member("y", state.position.y - w.y);
+  writer.member("z", state.position.z - w.z);
   writer.end_object();
 
   writer.key("effectors");
@@ -110,9 +116,9 @@ void KinematicSystem::serialize(agent::JsonWriter& writer) const {
     writer.begin_object();
     writer.key("position");
     writer.begin_object();
-    writer.member("x", effector.position.x);
-    writer.member("y", effector.position.y);
-    writer.member("z", effector.position.z);
+    writer.member("x", effector.position.x - w.x);
+    writer.member("y", effector.position.y - w.y);
+    writer.member("z", effector.position.z - w.z);
     writer.member("e", effector.position.w);
     writer.end_object();
     writer.key("stepper_position");
@@ -124,6 +130,23 @@ void KinematicSystem::serialize(agent::JsonWriter& writer) const {
     writer.end_object();
   }
   writer.end_array();
+
+  if (has_joints) {
+    writer.key("joints");
+    writer.begin_object();
+    writer.member("theta", joint_angles_deg.x);
+    writer.member("psi", joint_angles_deg.y);
+    writer.end_object();
+  }
+
+  if (has_probe_tip) {
+    writer.key("probe_tip");
+    writer.begin_object();
+    writer.member("x", probe_tip.x - w.x);
+    writer.member("y", probe_tip.y - w.y);
+    writer.member("z", probe_tip.z - w.z);
+    writer.end_object();
+  }
 
   writer.key("steppers");
   writer.begin_array();
@@ -811,3 +834,102 @@ void DeltaKinematicSystem::ui_widget() {
   ImGui::Text("y: %f", state.effector_position[0].position.y);
   ImGui::Text("z: %f", state.effector_position[0].position.z);
 }
+
+#if ENABLED(SCARA)
+
+//
+// SCARA: the A (X) stepper is the shoulder angle theta. The B (Y) stepper is
+// psi + theta * SCARA_CROSSTALK_FACTOR, where psi is the elbow angle relative to the
+// proximal arm (0 = straight). See forward_kinematics / inverse_kinematics in Marlin's
+// module/scara.cpp. The arm is built from the shoulder, which is fixed in the world (see scara_frame.h): the
+// tip is where the arms put it, whatever SCARA_OFFSET is. The agent interface reports it in Marlin's frame.
+//
+ScaraKinematicSystem::ScaraKinematicSystem(std::function<void(kinematic_state&)> on_kinematic_update) : KinematicSystem(on_kinematic_update) {
+  collect_steppers();
+  world_from_native = { scara_frame::shift_x, scara_frame::shift_y, 0 };
+  // Power up with each joint 30 degrees short of its endstop (and Z low), so G28 moves every
+  // joint. A real switch is at the end of travel, so a joint can't start beyond it: the
+  // homing bump would find the switch already closed and latch home early.
+  #ifdef SCARA_HOME_THETA
+    constexpr float home_a = SCARA_HOME_THETA, home_b = SCARA_HOME_PSI + SCARA_HOME_THETA * float(SCARA_CROSSTALK_FACTOR);
+  #else
+    constexpr float home_a = 0, home_b = 0;
+  #endif
+  hardware_offset.push_back(glm::vec3{ home_a - X_HOME_DIR * 30, home_b - Y_HOME_DIR * 30, Z_MAX_POS * 0.25f });
+}
+
+glm::vec2 ScaraKinematicSystem::joint_angles() const {
+  const auto& s = state.effector_position[0].stepper_position;
+  const float a = hardware_offset[0].x + s.x, b = hardware_offset[0].y + s.y;
+  return { a, b - a * float(SCARA_CROSSTALK_FACTOR) };
+}
+
+void ScaraKinematicSystem::kinematic_update() {
+  const glm::vec3 joint {
+    std::static_pointer_cast<StepperDriver>(steppers[AxisIndex::X])->steps() / steps_per_unit[0] * (((INVERT_X_DIR * 2) - 1) * -1.0),
+    std::static_pointer_cast<StepperDriver>(steppers[AxisIndex::Y])->steps() / steps_per_unit[1] * (((INVERT_Y_DIR * 2) - 1) * -1.0),
+    std::static_pointer_cast<StepperDriver>(steppers[AxisIndex::Z])->steps() / steps_per_unit[2] * (((INVERT_Z_DIR * 2) - 1) * -1.0)
+  };
+
+  extruder.clear();
+  for (size_t i = 0; i < EXTRUDERS; ++i)
+    extruder.push_back(std::static_pointer_cast<StepperDriver>(steppers[AxisIndex::E0 + i])->steps() / steps_per_unit[3 + (i * distinct_e_factors)] * (((extruder_invert_dir[i] * 2) - 1) * -1.0));
+
+  const float a = hardware_offset[0].x + joint.x,
+              psi = hardware_offset[0].y + joint.y - a * float(SCARA_CROSSTALK_FACTOR),
+              t1 = glm::radians(a), t2 = glm::radians(a + psi);
+  const glm::vec3 nozzle {
+    scara_frame::shoulder_x + SCARA_LINKAGE_1 * std::cos(t1) + SCARA_LINKAGE_2 * std::cos(t2),
+    scara_frame::shoulder_y + SCARA_LINKAGE_1 * std::sin(t1) + SCARA_LINKAGE_2 * std::sin(t2),
+    hardware_offset[0].z + joint.z
+  };
+
+  has_joints = true;
+  joint_angles_deg = { a, psi };
+
+  // Every hotend is bolted to the forearm: its offset from T0 is in the forearm's frame (X to the right of the
+  // arm's direction, Y toward its tip), so it turns with the arm. T0's tip is the arm's tool point.
+  const float turn = t2 - 1.57079632679f, c = std::cos(turn), s = std::sin(turn);
+  for (size_t i = 0; i < HOTENDS; ++i) {
+    const glm::vec3 o = hotend_offset_mm(i) - hotend_offset_mm(0);
+    const glm::vec3 tip { nozzle.x + o.x * c - o.y * s, nozzle.y + o.x * s + o.y * c, nozzle.z };
+    state.effector_position[i] = {joint, glm::vec4(tip, extruder[i]), filament_color[i]};
+  }
+
+  // The probe is bolted to the forearm too, at the M851 offset from T0 in the forearm's frame
+  #if HAS_BED_PROBE && DISABLED(NOZZLE_AS_PROBE)
+    has_probe_tip = true;
+    probe_tip = { nozzle.x + float(probe.offset.x) * c - float(probe.offset.y) * s,
+                  nozzle.y + float(probe.offset.x) * s + float(probe.offset.y) * c,
+                  nozzle.z + float(probe.offset.z) };
+  #endif
+
+  state.position = state.effector_position[0].position;
+  on_kinematic_update(state);
+}
+
+void ScaraKinematicSystem::ui_widget() {
+  const glm::vec2 j = joint_angles();
+  float value = j.x;
+  if (ImGui::SliderFloat("Shoulder (theta, deg)", &value, -180, 180)) {
+    hardware_offset[0].x = value - state.effector_position[0].stepper_position.x;
+    kinematic_update();
+  }
+  value = hardware_offset[0].y + state.effector_position[0].stepper_position.y;
+  if (ImGui::SliderFloat("Elbow stepper (deg)", &value, -360, 360)) {
+    hardware_offset[0].y = value - state.effector_position[0].stepper_position.y;
+    kinematic_update();
+  }
+  value = hardware_offset[0].z + state.effector_position[0].stepper_position.z;
+  if (ImGui::SliderFloat("Z (mm)", &value, -10, Z_MAX_POS + 10)) {
+    hardware_offset[0].z = value - state.effector_position[0].stepper_position.z;
+    kinematic_update();
+  }
+  ImGui::Text("Theta: %.2f  Psi: %.2f", j.x, j.y);
+  ImGui::Text("Cartesian Position:");
+  ImGui::Text("x: %f", state.effector_position[0].position.x);
+  ImGui::Text("y: %f", state.effector_position[0].position.y);
+  ImGui::Text("z: %f", state.effector_position[0].position.z);
+}
+
+#endif // SCARA

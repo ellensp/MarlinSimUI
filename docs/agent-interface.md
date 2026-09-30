@@ -35,7 +35,7 @@ Command-line options:
 | `--agent-port <n>` | Enable the agent interface on `127.0.0.1:<n>` (or `MARLIN_SIM_AGENT_PORT`). Off by default. |
 | `--serial-port <n>` | TCP port for the raw G-code socket (default 8099, or `MARLIN_SIM_SERIAL_PORT`). |
 | `--no-audio` | Disable buzzer/audio emulation (useful for unattended runs). |
-| `--machine <type>` | Viewport printer model: `bedslinger`, `cube` or `delta`. Default follows the build's kinematics. DELTA builds accept only `delta`; other builds accept all but `delta`. |
+| `--machine <type>` | Viewport printer model: `bedslinger`, `cube`, `delta` or `scara`. Default follows the build's kinematics. DELTA builds accept only `delta`, SCARA builds only `scara`; other builds accept `bedslinger` and `cube`. |
 | `--help` | Usage. |
 
 The simulator does not exit on its own. Stop it with `POST /kernel/control
@@ -152,7 +152,7 @@ Components opt in by overriding `Component::serialize()`. Implemented:
 
 | Component | Fields |
 | --- | --- |
-| Kinematic systems | Commanded position; per-effector position and stepper-derived position. |
+| Kinematic systems | Commanded position; per-effector position and stepper-derived position, in Marlin's native coordinates. On SCARA the shoulder is fixed in the viewport (centered behind the bed) and `SCARA_OFFSET` only sets how Marlin's coordinates map onto it, so `probe_tip` and the effectors are reported in Marlin's frame, and `joints` gives the ground-truth shoulder (`theta`, degrees from +X) and elbow (`psi`, degrees from the upper arm) angles, and a config whose offsets don't match the hardware puts the reach rings, limits and mesh off the plate instead of moving the arm. |
 | `Heater` | Temperature, ambient, energy, sensor mode (`Normal`/`ForceMin`/`ForceMax`/`ForcePause`/`Fixed`), PWM duty/period, volts, resistance, pins; the thermal model in MPC units (`heater_power`, `heat_capacity`, `ambient_xfer`, `fan_xfer`, `fan_heater_loss`, `filament_heat_capacity_permm`, `sensor_responsiveness`), `sensor_reading`, `fan_pin`, `fan_fraction` and the live power terms `power_heater`/`power_ambient`/`power_fan`/`power_filament` (W), fan-coupled sensor error (`fan_sensor_offset`, `fan_sensor_ripple`, `fan_sensor_ripple_period`, `fan_sensor_noise`, last `sensor_error`). Settable: all model and sensor-error terms, `sensor_mode`, `sensor_temperature`, `element_ok`, `temperature`, `ambient_temperature`. |
 | `EndStop` | Effective trigger, geometric trigger, manual override, pin level, pin. |
 | `Touch` (XPT2046) | Raw x/y, dirty, held, polls, injected touches, calibration. |
@@ -177,7 +177,7 @@ target.
 | `distance` | mm from the target, > 0. |
 | `x`, `y`, `z` | Camera target in Marlin coordinates (mm). All three or none. |
 | `follow` | `true` keeps the nozzle at the view center. |
-| `machine` | `bedslinger`, `cube` or `delta`; same availability rule as `--machine`. |
+| `machine` | `bedslinger`, `cube`, `delta` or `scara`; same availability rule as `--machine`. |
 | `markings` | `true`/`false` shows or hides the bed markings (origin, safe homing point, probeable area, tool reach, mesh grid), like Printer > Bed Markings. |
 | `volume` | `true`/`false` shows or hides the translucent printable volume of the active tool, like Printer > Printable Volume. DELTA builds only; always `false` otherwise. |
 

@@ -283,7 +283,7 @@ void handle_post_serial(const Request& request, Response& response) {
 // POST /view — set the Viewport camera (Turntable mode). All keys optional:
 //   {"preset":"home|front|right|back|left|top|iso", "yaw":deg, "pitch":deg,
 //    "distance":mm, "x":mm, "y":mm, "z":mm (target, Marlin coordinates; all three),
-//    "follow":bool, "machine":"bedslinger|cube|delta", "markings":bool, "volume":bool}
+//    "follow":bool, "machine":"bedslinger|cube|delta|scara", "markings":bool, "volume":bool}
 // Applied on the next UI frame; poll GET /view to confirm.
 void handle_get_view(const Request&, Response& response) {
   const view_control::State v = view_control::current();
@@ -326,7 +326,7 @@ void handle_post_view(const Request& request, Response& response) {
   body.get_string("machine", r.machine);
   if (!r.machine.empty()) {
     const MachineType type = machine_type_from_name(r.machine.c_str());
-    if (type == MACHINE_TYPE_COUNT) { response.error(400, "machine must be bedslinger, cube, or delta"); return; }
+    if (type == MACHINE_TYPE_COUNT) { response.error(400, "machine must be bedslinger, cube, delta, or scara"); return; }
     if (!MachineModel::is_available(type)) { response.error(400, "machine not available for this build's kinematics"); return; }
   }
   const int axes = body.has("x") + body.has("y") + body.has("z");

@@ -15,6 +15,7 @@
 #endif
 
 #include "hardware/KinematicSystem.h" // hotend_offset_mm
+#include "scara_frame.h"
 
 #undef abs
 #undef min
@@ -135,16 +136,24 @@ static void add_hotend_hot(VertexBuffer& buf) {
   add_cylinder(buf, {0, 3, 0}, {0, 6, 0}, 4.0f, color::brass, 6);
   add_box(buf, {-8, 6, -6}, {12, 17, 6}, color::heater);
 }
+constexpr float hotend_cold_top = 46;   // Height of the top of a hotend's cold end above its nozzle tip
 static void add_hotend_cold(VertexBuffer& buf, const glm::vec3 at) {
   add_cylinder(buf, at + glm::vec3(0, 17, 0), at + glm::vec3(0, 22, 0), 1.5f, color::rod, 8);
   for (int i = 0; i < 6; ++i) {
     const float y = 22.0f + i * 4.0f;
     add_cylinder(buf, at + glm::vec3(0, y, 0), at + glm::vec3(0, y + 2.0f, 0), 11.0f, color::frame, 20);
   }
-  add_cylinder(buf, at + glm::vec3(0, 22, 0), at + glm::vec3(0, 46, 0), 4.0f, color::frame, 12);
+  add_cylinder(buf, at + glm::vec3(0, 22, 0), at + glm::vec3(0, hotend_cold_top, 0), 4.0f, color::frame, 12);
 }
 
 static void move_to(renderer::Mesh& m, const glm::vec3 pos) { m.m_position = pos; }
+
+// SCARA: a part fixed to the forearm turns about the vertical through its origin. It is as modeled
+// (in Marlin's XY frame) when the forearm points along +Y, and turns with the forearm's direction from there.
+static glm::quat arm_turn(const MachinePose& p) { return glm::angleAxis(glm::radians(p.scara_angles.y - 90.0f), glm::vec3(0, 1, 0)); }
+static void turn_with_arm(renderer::Mesh& m, const MachinePose& p, const bool turns) {
+  m.m_rotation = turns ? arm_turn(p) : glm::quat(1, 0, 0, 0);
+}
 
 //
 // Parts shared by the printer models
@@ -351,6 +360,15 @@ DeltaGeometry MachineModel::default_delta() {
   #endif
 }
 
+ScaraGeometry MachineModel::default_scara() {
+  #if ENABLED(SCARA)
+    // The shoulder is hardware, fixed behind the bed's center; SCARA_OFFSET only says where it is in Marlin's XY (scara_frame.h)
+    return { float(SCARA_LINKAGE_1), float(SCARA_LINKAGE_2), { scara_frame::shoulder_x, scara_frame::shoulder_y } };
+  #else
+    return { 0, 0, {} }; // The SCARA model is only available with SCARA
+  #endif
+}
+
 MachineType machine_type_option = MACHINE_TYPE_COUNT;
 
 MachineType machine_type_from_name(const char* name) {
@@ -358,6 +376,7 @@ MachineType machine_type_from_name(const char* name) {
   if (n == "bedslinger")                 return MACHINE_BEDSLINGER;
   if (n == "cube" || n == "corexy")      return MACHINE_CUBE;
   if (n == "delta")                      return MACHINE_DELTA;
+  if (n == "scara")                      return MACHINE_SCARA;
   return MACHINE_TYPE_COUNT;
 }
 
@@ -366,24 +385,30 @@ const char* MachineModel::type_name(const MachineType type) {
     case MACHINE_BEDSLINGER: return "Bedslinger";
     case MACHINE_CUBE:       return "Cube (Z-Bed)";
     case MACHINE_DELTA:      return "Delta";
+    case MACHINE_SCARA:      return "SCARA";
     default:                 return "?";
   }
 }
 
 // The model must match the simulated kinematics: a DELTA build shows only the Delta,
-// and Cartesian / Core builds can switch between the Cartesian-style layouts.
+// a SCARA build only the SCARA, and Cartesian / Core builds can switch between the
+// Cartesian-style layouts.
 // TODO: BELTPRINTER model.
 bool MachineModel::is_available(const MachineType type) {
   #if ENABLED(DELTA)
     return type == MACHINE_DELTA;
+  #elif ENABLED(SCARA)
+    return type == MACHINE_SCARA;
   #else
-    return type < MACHINE_TYPE_COUNT && type != MACHINE_DELTA;
+    return type < MACHINE_TYPE_COUNT && type != MACHINE_DELTA && type != MACHINE_SCARA;
   #endif
 }
 
 MachineType MachineModel::default_type() {
   #if ENABLED(DELTA)
     return MACHINE_DELTA;
+  #elif ENABLED(SCARA)
+    return MACHINE_SCARA;
   #elif IS_CORE || ANY(MARKFORGED_XY, MARKFORGED_YX)
     return MACHINE_CUBE;
   #else
@@ -420,12 +445,16 @@ void MachineModel::add_cold_ends(VertexBuffer& b, const int carriage) const {
 
 // One heater block + nozzle per hotend, each following its carriage's nozzle at its offset.
 // Each has its own tint and glow uniforms, updated per frame by set_hotend_look().
-void MachineModel::add_hot_parts() {
+void MachineModel::add_hot_parts(const bool turns) {
   for (int h = 0; h < hotend_count(); ++h) {
     const glm::vec3 offset = hotend_offset(h);
     const bool on_x2 = carriage_of(h) == 1;
     const auto id = add_part([](VertexBuffer& b) { add_hotend_hot(b); },
-      [offset, on_x2](renderer::Mesh& m, const MachinePose& p) { move_to(m, (on_x2 ? p.x2_world : p.nozzle_world) + offset); }, false);
+      [offset, on_x2, turns](renderer::Mesh& m, const MachinePose& p) {
+        // On a SCARA forearm the hotend offsets turn about the T0 nozzle with the arm
+        move_to(m, (on_x2 ? p.x2_world : p.nozzle_world) + (turns ? arm_turn(p) * offset : offset));
+        turn_with_arm(m, p, turns);
+      }, false);
     auto mesh = renderer::get_mesh_by_id(id);
     mesh->m_shader_instance->set_uniform("u_tint", &hotend_tint[h]);
     mesh->m_shader_instance->set_uniform("u_glow", &hotend_glow[h]);
@@ -440,7 +469,7 @@ void MachineModel::add_hot_parts() {
 // local XZ) and holding the bracket within the carriage's height range [mount_lo, mount_hi].
 // A stowed BLTouch pulls its body probe_stow_raise up into the bracket.
 //
-void MachineModel::add_probe(std::function<glm::vec2(glm::vec2)> nearest, const float mount_lo, const float mount_hi) {
+void MachineModel::add_probe(std::function<glm::vec2(glm::vec2)> nearest, const float mount_lo, const float mount_hi, const bool reach_down, const bool turns) {
   if (!has_probe()) return;
   const glm::vec3 tip = probe_layout;
   const float top = tip.y + probe_length;                        // Body top when deployed; stowed, it rises through the bracket
@@ -448,11 +477,13 @@ void MachineModel::add_probe(std::function<glm::vec2(glm::vec2)> nearest, const 
   add_part([=](VertexBuffer& b) {
     const glm::vec2 p { tip.x, tip.z }, c = nearest(p);
     const glm::vec2 lo = glm::min(p, c) - 5.0f, hi = glm::max(p, c) + 5.0f;
-    add_box(b, {lo.x, by, lo.y}, {hi.x, by + 4, hi.y}, color::printed);
-  }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); }, false);
+    // Reaching down, the block's bottom is exactly the top of the deployed probe and it runs up to the mount
+    const float y0 = reach_down ? std::min(top, by) : by, y1 = reach_down ? std::max(top + 4, by + 4) : by + 4;
+    add_box(b, {lo.x, y0, lo.y}, {hi.x, y1, hi.y}, color::printed);
+  }, [=](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); turn_with_arm(m, p, turns); }, false);
   add_part([=](VertexBuffer& b) {
     add_cylinder(b, tip, tip + glm::vec3(0, probe_length, 0), probe_radius, color::probe, 16);
-  }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world + glm::vec3(0, p.probe_raise, 0)); }, false);
+  }, [=](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world + glm::vec3(0, p.probe_raise, 0)); turn_with_arm(m, p, turns); }, false);
 }
 
 void MachineModel::set_hotend_look(const int h, const glm::vec4 tint, const float glow, const float dim) {
@@ -473,6 +504,7 @@ void MachineModel::build(const MachineType new_type, std::shared_ptr<renderer::S
   switch (type) {
     case MACHINE_CUBE:  build_cube();  break;
     case MACHINE_DELTA: build_delta(); break;
+    case MACHINE_SCARA: build_scara(); break;
     default:            build_bedslinger(); break;
   }
 }
@@ -507,6 +539,7 @@ MachinePose MachineModel::pose(const glm::vec3 nozzle, const float x2) const {
       p.bed_offset = { 0, 0, nozzle.y - bed_y * 0.5f - lo.z };
     } break;
     case MACHINE_CUBE:
+    case MACHINE_SCARA:
       // The nozzle stays at the top; the bed drops as Z increases
       p.bed_offset = { 0, bed_z - nozzle.z, 0 };
       break;
@@ -1051,4 +1084,149 @@ void MachineModel::build_delta() {
   const float rim = effector_r + 8;
   add_probe([=](const glm::vec2 q) { const float l = glm::length(q); return l > rim ? q * (rim / l) : q; }, joint_y - 5, joint_y + 5);
   add_hot_parts();
+}
+
+//
+// SCARA: one arm over a Z bed, on a frame of just a back and a bottom.
+//
+// The simplest SCARA: the bed rides Z like the Cube's and the arm stays at one height.
+// Assembly, from the bottom up:
+//   Frame (fixed):  a bottom slab and a back slab. The Z drive(s) stand on the bottom and are
+//                   fastened to the back (screw tops and guide rods), as the Cube's are.
+//                   Motor A, the shoulder, hangs on a printed plate from the back.
+//   Bed (Z):        the bed plate with collars on the Z screw(s) and guide rods.
+//   Upper arm:      turns on motor A's shaft (shoulder, on top of the motor). It carries the
+//                   elbow motor B upside-down on top of its far end, shaft pointing down.
+//   Forearm:        under the upper arm, turned by B's shaft through the upper arm. Its far
+//                   end cylinder is centered on the tool point and the hotend hangs under it.
+//                   Extra hotends and the probe are bolted to the forearm: their offsets are in
+//                   the forearm's frame (as built when it points along +Y) and turn with it.
+//
+// Arm lengths are joint to joint (shoulder to elbow, elbow to tool): the bar spans exactly the
+// length, and each end cylinder is centered on its joint, so it stands past the bar's end by its
+// radius, "(|=====|)", which is all the extra length the arms need.
+//
+namespace scara_parts {
+  constexpr float w = 20;                       // Frame slab thickness
+  constexpr float bar_h = 10, bar_half = 7;     // Arm bar thickness, and half its width
+  constexpr float hub_r = 11, hub_extra = 2;    // End cylinders: radius, and how far they stand past the bar's top and bottom
+  constexpr float arm_gap = 2;                  // Gap between the forearm's end cylinders and the upper arm's
+  constexpr float shaft_r = 3;                  // Motor B's shaft, through the upper arm into the forearm
+  constexpr float plate_h = 6, plate_half = nema17 * 0.5f + 2; // Motor A's mounting plate
+
+  // An arm along local +X from its first joint at the origin: a bar between two vertical end
+  // cylinders, the second at 'end_x'. The bar spans [y0, y0 + bar_h]; the end cylinders stand proud.
+  static void add_arm(VertexBuffer& b, const float y0, const float end_x) {
+    add_box(b, {0, y0, -bar_half}, {end_x, y0 + bar_h, bar_half}, color::printed);
+    for (const float x : { 0.0f, end_x })
+      add_cylinder(b, {x, y0 - hub_extra, 0}, {x, y0 + bar_h + hub_extra, 0}, hub_r, color::printed, 24);
+  }
+
+  // A fixed part's bracket from the back slab's inner face (at z = back) to a post at p (GL XZ)
+  static void add_back_bracket(VertexBuffer& b, const float back, const glm::vec2 p, const float lo, const float hi, const float half) {
+    add_box(b, {p.x - half, lo, back}, {p.x + half, hi, p.y + half}, color::printed);
+  }
+}
+
+void MachineModel::build_scara() {
+  using namespace scara_parts;
+  const float arm1 = scara.arm1, arm2 = scara.arm2;
+  const glm::vec3 shoulder_w { scara.shoulder.x, bed_z, -scara.shoulder.y };  // Fixed; the arms ride at the nozzle's (top) height
+
+  // Heights above the nozzle tip: the forearm's underside meets the hotends' tops, the upper arm is
+  // over it with a gap between their end cylinders, and each motor stands against its arm
+  glm::vec3 all_lo, all_hi;
+  hotend_extent(all_lo, all_hi);
+  const float fy0 = all_hi.y + hotend_cold_top, fy1 = fy0 + bar_h;       // Forearm
+  const float ay0 = fy1 + hub_extra * 2 + arm_gap, ay1 = ay0 + bar_h;    // Upper arm
+  const float motor_a_lo = bed_z + ay0 - nema17;                         // World height of motor A's underside
+
+  // Z drives (GL XZ), and with a single Z stepper two guide rods beside its screw
+  std::vector<glm::vec2> zd;
+  for (const auto& p : z_drive_xy()) zd.push_back({ p.x, -p.y });
+  std::vector<glm::vec2> guides;
+  if (zd.size() == 1) guides = { { bed_x * 0.25f, zd[0].y }, { bed_x * 0.75f, zd[0].y } };
+
+  // Frame extents: everything stands in front of the back slab and over the bottom slab
+  const glm::vec2 sh { scara.shoulder.x, -scara.shoulder.y };            // Shoulder (GL XZ)
+  constexpr float r = nema17 * 0.5f + 2;
+  float xl = std::min(-cube::plate_lip - 2, sh.x - plate_half), xr = std::max(bed_x + cube::plate_lip + 2, sh.x + plate_half);
+  float zb = std::min(-bed_y - cube::plate_lip - 4, sh.y - nema17 * 0.5f - 4);   // Inner face of the back slab
+  float zf = cube::plate_lip + 2;
+  for (const auto& p : zd) {
+    xl = std::min(xl, p.x - r); xr = std::max(xr, p.x + r);
+    zb = std::min(zb, p.y - r); zf = std::max(zf, p.y + r);
+  }
+  xl -= 10; xr += 10;
+  const float y0 = cube::collar_lo - 2 - nema17 - w;                     // Bottom of the frame: Z motors fit under the bed collars
+  const float base = y0 + w;                                             // Top of the bottom slab
+  const float beam_y = bed_z + 5;                                        // Screw and rod tops, just over the top of the bed travel
+  const float top = std::max(motor_a_lo, beam_y + w) + 10;               // Top of the back slab: a little over motor A's plate and the Z tops,
+                                                                         // so the arms swing past it
+
+  add_part([&](VertexBuffer& b) {
+    add_box(b, {xl, y0, zb - w}, {xr, top, zb}, color::frame);           // Back
+    add_box(b, {xl, y0, zb}, {xr, base, zf}, color::frame);              // Bottom
+    // Motor A, the shoulder: on a plate reaching from the back slab, shaft up
+    add_box(b, {sh.x - plate_half, motor_a_lo - plate_h, zb}, {sh.x + plate_half, motor_a_lo, sh.y + plate_half}, color::printed);
+    add_motor(b, {sh.x, motor_a_lo + nema17 * 0.5f, sh.y});
+    // Z drives: motor on the bottom slab, screw up to a bracket on the back slab
+    for (const auto& p : zd) {
+      add_motor(b, {p.x, base + nema17 * 0.5f, p.y});
+      add_cylinder(b, {p.x, base + nema17, p.y}, {p.x, beam_y + w - 2, p.y}, cube::zscrew_r, color::screw);
+      add_back_bracket(b, zb, p, beam_y, beam_y + w, 12);
+    }
+    for (const auto& p : guides) {
+      add_cylinder(b, {p.x, base, p.y}, {p.x, beam_y + w - 2, p.y}, cube::zrod_r, color::rod);
+      add_back_bracket(b, zb, p, base, base + w, 12);
+      add_back_bracket(b, zb, p, beam_y, beam_y + w, 12);
+    }
+  });
+
+  // Bed, which rides Z: the plate, and a collar and arm at every Z screw and guide rod
+  add_part([&](VertexBuffer& b) {
+    add_box(b, {-cube::plate_lip, -9, -bed_y - cube::plate_lip}, {bed_x + cube::plate_lip, bed_top, cube::plate_lip}, color::bed);
+    for (const auto& p : zd) cube::add_bed_collar(b, p);
+    for (const auto& p : guides) cube::add_bed_collar(b, p);
+  }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.bed_offset); });
+
+  // Upper arm (origin at the shoulder, turning about the vertical with the angle of the arm in
+  // Marlin XY), and motor B upside-down on its elbow end with the shaft going down through it
+  add_part([=](VertexBuffer& b) {
+    add_arm(b, ay0, arm1);
+    add_motor(b, {arm1, ay1 + hub_extra + nema17 * 0.5f, 0});
+  }, [=](renderer::Mesh& m, const MachinePose& p) {
+    m.m_position = shoulder_w;
+    m.m_rotation = glm::angleAxis(glm::radians(p.scara_angles.x), glm::vec3(0, 1, 0));
+  }, false);
+
+  // Forearm (origin at the elbow): from B's shaft to the tool, which is arm2 along it
+  add_part([=](VertexBuffer& b) {
+    add_arm(b, fy0, arm2);
+    add_cylinder(b, {0, fy1, 0}, {0, ay1 + hub_extra, 0}, shaft_r, color::rod, 12);
+  }, [=](renderer::Mesh& m, const MachinePose& p) {
+    const float t1 = glm::radians(p.scara_angles.x);
+    m.m_position = shoulder_w + glm::vec3(std::cos(t1), 0, -std::sin(t1)) * arm1;
+    m.m_rotation = glm::angleAxis(glm::radians(p.scara_angles.y), glm::vec3(0, 1, 0));
+  }, false);
+
+  // Hotends' cold ends, hanging from the forearm's end cylinder, and the mounts that hold the others: a cylinder on top
+  // of each (like the arms' end cylinders) joined to the center of the forearm's end cylinder, which is the tool point,
+  // by a bar the thickness of the arms. They turn with the forearm, as the offsets are in its frame.
+  add_part([&](VertexBuffer& b) {
+    add_cold_ends(b, 0);
+    for (int h = 1; h < hotend_count(); ++h) {
+      const glm::vec3 o = hotend_offset(h);                          // (x, height, z) from the T0 nozzle: the tool point is straight over it
+      const float top = o.y + hotend_cold_top, hub_lo = fy0 - hub_extra, hub_hi = fy1 + hub_extra;
+      if (top < hub_lo) add_cylinder(b, {o.x, top, o.z}, {o.x, hub_lo, o.z}, 4.0f, color::frame, 12);   // Stem up from the cold end
+      add_cylinder(b, {o.x, std::min(top, hub_lo), o.z}, {o.x, hub_hi, o.z}, hub_r, color::printed, 24);
+      const glm::vec2 d { o.x, o.z };
+      if (glm::length(d) > 0.5f)                                     // The bar from the end cylinder's center to this one's
+        add_block_facing(b, {o.x * 0.5f, (fy0 + fy1) * 0.5f, o.z * 0.5f}, {d.x, 0, d.y}, {2 * bar_half, bar_h, glm::length(d)}, color::printed);
+    }
+  },
+    [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); turn_with_arm(m, p, true); }, false);
+  // The probe's bracket reaches the end cylinder, which looks the same at any arm angle
+  add_probe([=](const glm::vec2 q) { const float l = glm::length(q); return l > hub_r ? q * (hub_r / l) : q; }, fy0 - hub_extra, fy1 + hub_extra, true, true);
+  add_hot_parts(true);
 }

@@ -264,6 +264,7 @@ void Visualisation::create() {
   //
   auto kin = virtual_printer.get_component<KinematicSystem>("Cartesian Kinematic System");
   if (kin == nullptr) kin = virtual_printer.get_component<KinematicSystem>("Delta Kinematic System");
+  if (kin == nullptr) kin = virtual_printer.get_component<KinematicSystem>("SCARA Kinematic System");
   if (kin == nullptr) kin = virtual_printer.get_component<KinematicSystem>("CoreXY Kinematic System");
   if (kin == nullptr) kin = virtual_printer.get_component<KinematicSystem>("CoreXZ Kinematic System");
   if (kin == nullptr) kin = virtual_printer.get_component<KinematicSystem>("CoreYZ Kinematic System");
@@ -345,6 +346,15 @@ void Visualisation::update() {
       pose.towers = delta->hardware_offset[0] + delta->state.effector_position[0].stepper_position;
     }
   }
+  #if ENABLED(SCARA)
+    if (machine.type == MACHINE_SCARA) {
+      // The arms point where the shoulder and elbow steppers say: the upper arm at theta, the forearm at theta + psi
+      if (auto scara = virtual_printer.get_component<ScaraKinematicSystem>("SCARA Kinematic System")) {
+        const glm::vec2 joint = scara->joint_angles();
+        pose.scara_angles = { joint.x, joint.x + joint.y };
+      }
+    }
+  #endif
   if (show_machine) machine.update(pose);
 
   //

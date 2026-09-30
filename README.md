@@ -87,15 +87,15 @@ Command-line options:
 | `--agent-port <n>` | Enable the agent interface on `127.0.0.1:<n>` (or `MARLIN_SIM_AGENT_PORT`). |
 | `--serial-port <n>` | TCP port for the raw G-code socket (default 8099, or `MARLIN_SIM_SERIAL_PORT`). |
 | `--no-audio` | Disable buzzer emulation. |
-| `--machine <type>` | Viewport printer model: `bedslinger`, `cube` or `delta`. |
+| `--machine <type>` | Viewport printer model: `bedslinger`, `cube`, `delta` or `scara`. |
 
 ### 3D printer models in the Viewport
 
 The Viewport draws a whole printer that moves with the simulation, sized from
 your configuration (bed size, Z height, delta geometry).
 
-- **Bedslinger** (i3 style), **Cube** (head on top, bed moves in Z) and **Delta**.
-  DELTA builds show the Delta; other builds offer the Bedslinger and the Cube.
+- **Bedslinger** (i3 style), **Cube** (head on top, bed moves in Z), **Delta** and **SCARA** (one arm over a Z bed).
+  DELTA builds show the Delta, SCARA builds the SCARA; other builds offer the Bedslinger and the Cube.
   Choose one in the **Printer** menu, with `--machine`, or with `POST /view`.
 - **Multiple hotends:** one hotend per `HOTENDS`, placed at its tool offset. The
   model follows `M218`, `M501` and anything else that changes the offsets.
@@ -109,6 +109,9 @@ your configuration (bed size, Z height, delta geometry).
   Toggle with **Printer > Bed Markings**. On a Delta the reach also includes
   the physical limit of the arms: a solid light orange rounded triangle with its
   corners toward the towers.
+  On a SCARA the software endstops are a box, solid light orange rings show the reach of the arms
+  and the dead zone around the shoulder where they cross the bed, and dashed rings show the
+  probe's own reach (it hangs from the forearm at the `M851` offset).
 - **Printable volume (Delta):** **Printer > Printable Volume** shows a translucent
   volume of where the active tool can print, from the live `M665`/`M666`/`M218`
   geometry. The top is scooped toward each tower, where the carriages reach their

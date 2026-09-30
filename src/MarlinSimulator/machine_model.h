@@ -1,7 +1,7 @@
 #pragma once
 
 //
-// Procedural 3D printer models for the Viewport: Bedslinger, Cube (Z-bed) and Delta.
+// Procedural 3D printer models for the Viewport: Bedslinger, Cube (Z-bed), Delta and SCARA.
 // Geometry is sized from the Marlin configuration and animated from the nozzle position.
 //
 // GL coordinates: X = Marlin X, Y = Marlin Z (up), Z = -Marlin Y.
@@ -17,7 +17,7 @@
 #include "renderer/renderer.h"
 
 // Simple-geometry models size themselves from the Marlin config.
-enum MachineType : uint8_t { MACHINE_BEDSLINGER, MACHINE_CUBE, MACHINE_DELTA, MACHINE_TYPE_COUNT };
+enum MachineType : uint8_t { MACHINE_BEDSLINGER, MACHINE_CUBE, MACHINE_DELTA, MACHINE_SCARA, MACHINE_TYPE_COUNT };
 
 // Placement of the moving parts for one frame
 struct MachinePose {
@@ -26,6 +26,7 @@ struct MachinePose {
   glm::vec3 nozzle_world {};  // Nozzle position in world GL coordinates
   bool has_towers = false;    // Delta: 'towers' holds the simulated carriage heights
   glm::vec3 towers {};        // Delta: carriage heights (A, B, C) from the tower steppers
+  glm::vec2 scara_angles {};  // SCARA: direction of the upper arm and of the forearm (degrees CCW from Marlin +X)
   glm::vec3 x2_world {};      // IDEX: origin of the X2 carriage (its X, the X1 nozzle's height and depth)
   float probe_raise = 0;      // Bed probe lift above its deployed position (BLTouch stowed)
 };
@@ -37,6 +38,13 @@ struct DeltaGeometry {
   float radius, diagonal_rod, height, printable_radius;
 };
 
+// SCARA geometry, from the Marlin config: the two arm lengths (joint to joint, and elbow to
+// tool) and the shoulder's position on the sim bed (Marlin XY, SCARA_OFFSET plus the bed center).
+struct ScaraGeometry {
+  float arm1, arm2;
+  glm::vec2 shoulder;
+};
+
 // Set by --machine on the command line; MACHINE_TYPE_COUNT = use the Marlin config
 extern MachineType machine_type_option;
 MachineType machine_type_from_name(const char* name); // MACHINE_TYPE_COUNT if unknown
@@ -45,8 +53,9 @@ class MachineModel {
 public:
   static const char* type_name(const MachineType type);
   static MachineType default_type();  // From the Marlin kinematics (DELTA, IS_CORE, ...)
-  static bool is_available(const MachineType type); // DELTA builds: Delta only. Otherwise: all but Delta.
+  static bool is_available(const MachineType type); // DELTA builds: Delta only. SCARA builds: SCARA only. Otherwise: Bedslinger and Cube.
   static DeltaGeometry default_delta();
+  static ScaraGeometry default_scara();
 
   void build(const MachineType type, std::shared_ptr<renderer::ShaderProgram> program);
   void destroy();
@@ -89,6 +98,7 @@ public:
 
   MachineType type = MACHINE_BEDSLINGER;
   DeltaGeometry delta = default_delta();
+  ScaraGeometry scara = default_scara();
   bool visible = true;
 
 private:
@@ -105,10 +115,13 @@ private:
   // carriage = -1 takes the extent of every hotend on every carriage.
   void hotend_extent(glm::vec3& lo, glm::vec3& hi, const int carriage = -1) const;
   void add_cold_ends(renderer::Buffer<renderer::vertex_data_t>& b, const int carriage = 0) const;
-  void add_hot_parts();  // Heater block + nozzle of every hotend, each its own tintable mesh
+  void add_hot_parts(const bool turns = false);  // Heater block + nozzle of every hotend, each its own tintable mesh. turns: SCARA, offsets turn with the forearm
   // Bed probe (X1 carriage / effector): a bracket from the part's nearest point (carriage-local XZ)
-  // at a height within [mount_lo, mount_hi], and the body, lifted by pose.probe_raise
-  void add_probe(std::function<glm::vec2(glm::vec2)> nearest, const float mount_lo, const float mount_hi);
+  // at a height within [mount_lo, mount_hi], and the body, lifted by pose.probe_raise.
+  // reach_down: the bracket reaches down to the top of the deployed probe, for a carriage that is higher than the probe.
+  // turns: the probe is fixed to the SCARA forearm, so its M851 offset is in the forearm's frame (X to the right of the
+  // arm's direction, Y toward its tip) and turns about the nozzle: it is the plain offset when the forearm points along +Y.
+  void add_probe(std::function<glm::vec2(glm::vec2)> nearest, const float mount_lo, const float mount_hi, const bool reach_down = false, const bool turns = false);
   void x_travel(float& lo, float& hi) const;  // X range the nozzles can reach (IDEX: X1 min to the X2 endstop)
   // Carriage-local X extent of carriage c: its hotends plus 'margin' each side, and the probe on X1
   void carriage_span(const int c, const float margin, float& lo, float& hi) const;
@@ -117,6 +130,7 @@ private:
   void build_bedslinger();
   void build_cube();
   void build_delta();
+  void build_scara();
 
   std::vector<Part> parts;
   std::shared_ptr<renderer::ShaderProgram> program;

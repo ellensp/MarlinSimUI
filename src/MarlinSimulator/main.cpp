@@ -77,8 +77,8 @@ static void print_usage(const char* argv0) {
   printf("  --agent-port <n>    Enable the HTTP agent control interface on 127.0.0.1:<n>\n");
   printf("                      (also settable via MARLIN_SIM_AGENT_PORT)\n");
   printf("  --no-audio          Disable audio/buzzer emulation\n");
-  printf("  --machine <type>    Printer model in the Viewport: bedslinger, cube, delta\n");
-  printf("                      (default: from the Marlin configuration; DELTA builds allow only delta)\n");
+  printf("  --machine <type>    Printer model in the Viewport: bedslinger, cube, delta, scara\n");
+  printf("                      (default: from the Marlin configuration; DELTA and SCARA builds allow only their own)\n");
   printf("  --help              Show this message\n");
 }
 
@@ -123,11 +123,11 @@ static bool parse_command_line(int argc, char** argv, CommandLineOptions& option
     }
     else if (strcmp(arg, "--machine") == 0) {
       if (i + 1 >= argc || (machine_type_option = machine_type_from_name(argv[++i])) == MACHINE_TYPE_COUNT) {
-        fprintf(stderr, "--machine requires one of: bedslinger, cube, delta\n");
+        fprintf(stderr, "--machine requires one of: bedslinger, cube, delta, scara\n");
         return false;
       }
       if (!MachineModel::is_available(machine_type_option)) {
-        fprintf(stderr, "--machine %s: not available for this build's kinematics (DELTA builds show only 'delta')\n", argv[i]);
+        fprintf(stderr, "--machine %s: not available for this build's kinematics (DELTA builds show only 'delta', SCARA builds only 'scara')\n", argv[i]);
         return false;
       }
     }

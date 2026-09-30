@@ -5,6 +5,7 @@
 
 #include "bed_markings.h"
 #include "delta_reach.h"
+#include "scara_frame.h"
 
 #include <algorithm>
 #include <cmath>
@@ -48,7 +49,12 @@ constexpr float symbol_r = 5.0f,   // Origin / safe-home circle radius
 
 // Marlin native XY -> the simulated bed's XY. Cartesian beds start at 0,0; a Delta
 // (BED_CENTER_AT_0_0) has its center at 0,0 and the simulator's bed at X_BED_SIZE/2.
-const glm::vec2 to_bed { float(X_BED_SIZE) * 0.5f - float(X_CENTER), float(Y_BED_SIZE) * 0.5f - float(Y_CENTER) };
+#if ENABLED(SCARA)
+  // The shoulder is fixed in the world, and SCARA_OFFSET puts Marlin's XY relative to it (scara_frame.h)
+  const glm::vec2 to_bed { scara_frame::shift_x, scara_frame::shift_y };
+#else
+  const glm::vec2 to_bed { float(X_BED_SIZE) * 0.5f - float(X_CENTER), float(Y_BED_SIZE) * 0.5f - float(Y_CENTER) };
+#endif
 
 // Flat strokes on the bed, following its surface. Points are Marlin native XY.
 struct Painter {
@@ -101,13 +107,18 @@ struct Painter {
       line(a + u * s, a + u * std::min(s + dash, len), w, col);
   }
 
-  void ring(const glm::vec2 c, const float r, const float w, const glm::vec4& col, const bool dashes=false) {
+  // 'on_bed' keeps only the pieces over the bed, for a ring that reaches past its edge
+  void ring(const glm::vec2 c, const float r, const float w, const glm::vec4& col, const bool dashes=false, const bool on_bed=false) {
     const int sides = std::max(24, int(glm::two_pi<float>() * r / 2.0f)); // ~2mm pieces, so dashes don't alias
     const float ri = r - w * 0.5f, ro = r + w * 0.5f, step = glm::two_pi<float>() / sides;
     for (int i = 0; i < sides; ++i) {
       const float a0 = i * step, a1 = a0 + step;
       if (dashes && std::fmod(a0 * r, dash + gap) >= dash) continue; // Dashes by arc length
       const glm::vec2 d0 { std::cos(a0), std::sin(a0) }, d1 { std::cos(a1), std::sin(a1) };
+      if (on_bed) {
+        const glm::vec2 m = c + (d0 + d1) * (0.5f * r) + to_bed;
+        if (m.x < 0 || m.y < 0 || m.x > float(X_BED_SIZE) || m.y > float(Y_BED_SIZE)) continue;
+      }
       quad(c + d0 * ri, c + d0 * ro, c + d1 * ro, c + d1 * ri, col);
     }
   }
@@ -140,6 +151,10 @@ struct Inputs {
   float reach_radius = 0;
   glm::vec2 reach_center {};      // Kinematic: soft endstop circle center (the active tool's offset)
   std::vector<glm::vec2> physical; // Delta: where the active tool can physically reach, on the bed
+  bool has_scara = false;          // SCARA: the arms reach an annulus around the shoulder
+  glm::vec2 scara_center {};       // The shoulder (Marlin native XY)
+  float scara_outer = 0, scara_inner = 0;
+  float scara_probe_outer = 0, scara_probe_inner = 0;  // SCARA: the ring the probe (a tool of its own) reaches, less PROBING_MARGIN
 
   void gather() {
     // Where the active tool can go: the software endstops (native coordinates), which
@@ -149,7 +164,7 @@ struct Inputs {
       reach_on = motion.soft_endstop._enabled;    // M211 S0/S1 (not the brief "loose" state)
       reach_min = { motion.soft_endstop.min.x, motion.soft_endstop.min.y };
       reach_max = { motion.soft_endstop.max.x, motion.soft_endstop.max.y };
-      #if IS_KINEMATIC
+      #if IS_KINEMATIC && DISABLED(SCARA)   // (A SCARA's software endstops are a box, like a Cartesian's)
         // The radius Marlin clamps XY moves to (see Motion::update_software_endstops).
         // Motion::apply_limits clamps (target - hotend offset), so it's centered on the offset.
         reach_radius = std::min({ std::abs(std::max(reach_min.x, reach_min.y)), reach_max.x, reach_max.y });
@@ -172,11 +187,26 @@ struct Inputs {
       }
     #endif
 
+    // SCARA: the tool reaches from |L1 - L2| to L1 + L2 from the shoulder, and Marlin also
+    // refuses anything inside MIDDLE_DEAD_ZONE_R (can_reach in motion.cpp)
+    #if ENABLED(SCARA)
+      has_scara = true;
+      scara_center = { float(SCARA_OFFSET_X), float(SCARA_OFFSET_Y) };
+      scara_outer = float(SCARA_LINKAGE_1) + float(SCARA_LINKAGE_2);
+      scara_inner = std::abs(float(SCARA_LINKAGE_1) - float(SCARA_LINKAGE_2));
+      #if MIDDLE_DEAD_ZONE_R > 0
+        scara_inner = std::max(scara_inner, float(MIDDLE_DEAD_ZONE_R));
+      #endif
+    #endif
+
     #if HAS_BED_PROBE
       has_probe_area = true;
       probe_min = { probe.min_x(), probe.min_y() };
       probe_max = { probe.max_x(), probe.max_y() };
-      #if IS_KINEMATIC
+      #if ENABLED(SCARA)
+        // The bounds are the bed less the margin. Within them the probe, bolted to the forearm, reaches its own ring
+        scara_reach_ring(scara_tool(probe.offset_xy), PROBING_MARGIN, scara_probe_inner, scara_probe_outer);
+      #elif IS_KINEMATIC
         round_area = true;
         probe_radius = probe.probe_radius();
       #endif
@@ -214,7 +244,8 @@ struct Inputs {
   std::vector<float> signature() const {
     std::vector<float> s { float(has_probe_area), probe_min.x, probe_min.y, probe_max.x, probe_max.y, probe_radius,
                            float(has_home), home.x, home.y, float(has_reach), float(reach_on), reach_min.x, reach_min.y, reach_max.x, reach_max.y,
-                           reach_center.x, reach_center.y, float(grid_x.size()), float(grid_y.size()), float(physical.size()) };
+                           reach_center.x, reach_center.y, float(grid_x.size()), float(grid_y.size()), float(physical.size()),
+                           float(has_scara), scara_center.x, scara_center.y, scara_outer, scara_inner, scara_probe_outer, scara_probe_inner };
     for (const auto& p : physical) s.insert(s.end(), { p.x, p.y });
     s.insert(s.end(), grid_x.begin(), grid_x.end());
     s.insert(s.end(), grid_y.begin(), grid_y.end());
@@ -281,10 +312,16 @@ bool BedMarkings::update(const BedZ& bed_z, const bool force) {
   // Delta: the physical reach of the active tool (solid), with the soft endstops inside it (dashed)
   if (!in.physical.empty()) p.loop(in.physical, reach_w, col_reach);
 
+  // SCARA: the outer reach and the dead zone around the shoulder (solid), where over the bed
+  if (in.has_scara) {
+    p.ring(in.scara_center, in.scara_outer, reach_w, col_reach, false, true);
+    if (in.scara_inner > 1) p.ring(in.scara_center, in.scara_inner, reach_w, col_reach, false, true);
+  }
+
   // Tool reach: dashed outline of the software endstops, darker when M211 has them off
   if (in.has_reach) {
     const glm::vec4& col = in.reach_on ? col_reach : col_reach_off;
-    #if IS_KINEMATIC
+    #if IS_KINEMATIC && DISABLED(SCARA)
       p.ring(in.reach_center, in.reach_radius, reach_w, col, true);
     #else
       const glm::vec2 a = in.reach_min, c = in.reach_max, b { c.x, a.y }, d { a.x, c.y };
@@ -304,6 +341,11 @@ bool BedMarkings::update(const BedZ& bed_z, const bool force) {
       p.dashed(b, c, probe_w, col_probe);
       p.dashed(c, d, probe_w, col_probe);
       p.dashed(d, a, probe_w, col_probe);
+    }
+    // SCARA: the probe reaches a ring too, so what G29 can probe is the bounds where they're inside it
+    if (in.scara_probe_outer > 0) {
+      p.ring(in.scara_center, in.scara_probe_outer, probe_w, col_probe, true, true);
+      if (in.scara_probe_inner > 1) p.ring(in.scara_center, in.scara_probe_inner, probe_w, col_probe, true, true);
     }
   }
 

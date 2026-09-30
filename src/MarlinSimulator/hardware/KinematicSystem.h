@@ -38,6 +38,18 @@ public:
   void collect_steppers();
   virtual void serialize(agent::JsonWriter& writer) const override;
 
+  // Added to a native (Marlin) position to get the simulator's world position, for kinematics whose world is not
+  // Marlin's coordinates (SCARA). The agent interface reports positions in Marlin's frame, so this is taken out there.
+  glm::vec3 world_from_native {};
+
+  // The joint angles in degrees, when the kinematics have them (SCARA: the shoulder from +X, and the elbow from the upper arm)
+  bool has_joints = false;
+  glm::vec2 joint_angles_deg {};
+
+  // Where the bed probe's tip is, when the kinematics know (SCARA, whose probe turns with the arm)
+  bool has_probe_tip = false;
+  glm::vec3 probe_tip {};
+
   std::vector<glm::vec3> hardware_offset {};
   std::vector<std::shared_ptr<VirtualPrinter::Component>> steppers;
   kinematic_state state{};
@@ -117,4 +129,17 @@ public:
 
   glm::vec3 forward_kinematics(const double z1, const double z2, const double z3);
   void recalc_delta_settings();
+};
+
+// SCARA (Morgan / MP SCARA): the X and Y steppers turn the shoulder and elbow in degrees,
+// the arm assembly rides Z. Same math as Marlin's module/scara.cpp.
+class ScaraKinematicSystem : public KinematicSystem {
+public:
+  ScaraKinematicSystem(std::function<void(kinematic_state&)> on_kinematic_update);
+  virtual void ui_widget() override;
+  virtual void kinematic_update() override;
+
+  // Joint angles in degrees from the stepper positions: shoulder (theta) and elbow (psi, relative to the proximal arm)
+  glm::vec2 joint_angles() const;
+  std::vector<double> extruder {};
 };

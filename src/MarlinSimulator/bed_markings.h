@@ -10,6 +10,11 @@
 //  - The active tool's reach: orange dashed outline of the live software endstops,
 //    light orange when enabled, darker orange when M211 has them off. On a Delta also
 //    a solid light orange rounded triangle: where the arms let the active tool reach.
+//  - SCARA: solid light orange rings around the shoulder for the outer reach (L1 + L2) and the
+//    dead zone (|L1 - L2|, or MIDDLE_DEAD_ZONE_R if larger), drawn where they cross the bed
+//    The software endstops are a box, as on a Cartesian, and the probeable area is the bed less the
+//    probing margin, with dashed rings for the probe's own reach, which is a different ring (it hangs
+//    from the forearm at the M851 offset)
 //  - The leveling mesh grid: light blue lines (the live mesh, or the grid G29 would probe)
 //
 // Positions come from live Marlin state and are rebuilt when they change.

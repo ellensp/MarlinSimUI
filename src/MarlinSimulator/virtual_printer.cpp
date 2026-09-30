@@ -156,6 +156,31 @@ void VirtualPrinter::build() {
     root->add_component<EndStop>("Endstop(Tower A Max)", X_MAX_PIN, !X_MAX_ENDSTOP_HIT_STATE, [kinematics](){ return kinematics->state.effector_position[0].stepper_position.x >= DELTA_HEIGHT; });
     root->add_component<EndStop>("Endstop(Tower B Max)", Y_MAX_PIN, !Y_MAX_ENDSTOP_HIT_STATE, [kinematics](){ return kinematics->state.effector_position[0].stepper_position.y >= DELTA_HEIGHT; });
     root->add_component<EndStop>("Endstop(Tower C Max)", Z_MAX_PIN, !Z_MAX_ENDSTOP_HIT_STATE, [kinematics](){ return kinematics->state.effector_position[0].stepper_position.z >= DELTA_HEIGHT; });
+  #elif ENABLED(SCARA)
+    // Marlin homes the joints (degrees) and then sets them to SCARA_HOME_THETA / SCARA_HOME_PSI,
+    // so the X (shoulder) and Y (elbow) endstops sit at those stepper angles.
+    auto kinematics = root->add_component<ScaraKinematicSystem>("SCARA Kinematic System", on_kinematic_update);
+    #ifdef SCARA_HOME_THETA
+      constexpr float home_a = SCARA_HOME_THETA, home_b = SCARA_HOME_PSI + SCARA_HOME_THETA * float(SCARA_CROSSTALK_FACTOR);
+    #else
+      constexpr float home_a = 0, home_b = 0;
+    #endif
+    auto joint = [kinematics](const int i) { return kinematics->hardware_offset[0][i] + kinematics->state.effector_position[0].stepper_position[i]; };
+    #if X_HOME_DIR < 0
+      root->add_component<EndStop>("Endstop(Shoulder Min)", X_MIN_PIN, !X_MIN_ENDSTOP_HIT_STATE, [=](){ return joint(0) <= home_a; });
+    #else
+      root->add_component<EndStop>("Endstop(Shoulder Max)", X_MAX_PIN, !X_MAX_ENDSTOP_HIT_STATE, [=](){ return joint(0) >= home_a; });
+    #endif
+    #if Y_HOME_DIR < 0
+      root->add_component<EndStop>("Endstop(Elbow Min)", Y_MIN_PIN, !Y_MIN_ENDSTOP_HIT_STATE, [=](){ return joint(1) <= home_b; });
+    #else
+      root->add_component<EndStop>("Endstop(Elbow Max)", Y_MAX_PIN, !Y_MAX_ENDSTOP_HIT_STATE, [=](){ return joint(1) >= home_b; });
+    #endif
+    #if Z_HOME_DIR < 0
+      root->add_component<EndStop>("Endstop(Z Min)", Z_MIN_PIN, !Z_MIN_ENDSTOP_HIT_STATE, [kinematics](){ return kinematics->state.effector_position[0].position.z <= Z_MIN_POS; });
+    #else
+      root->add_component<EndStop>("Endstop(Z Max)", Z_MAX_PIN, !Z_MAX_ENDSTOP_HIT_STATE, [kinematics](){ return kinematics->state.effector_position[0].position.z >= Z_MAX_POS; });
+    #endif
   #elif ENABLED(COREXY)
     auto kinematics = root->add_component<CoreXYKinematicSystem>("CoreXY Kinematic System", on_kinematic_update);
     #if X_HOME_DIR < 0
