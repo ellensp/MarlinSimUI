@@ -72,6 +72,13 @@ public:
   static glm::vec3 live_probe_offset();              // GL offset of the probe tip from the nozzle, now
   static constexpr float probe_radius = 3, probe_length = 36, probe_stow_raise = 7;
 
+  // Z drives (lead screw + motor) of the Cube's bed, in Marlin XY: one per Z stepper (NUM_Z_STEPPERS).
+  // With 2+ they are placed where the bed attaches, which Marlin describes with the G34 settings:
+  // Z_STEPPER_ALIGN_STEPPER_XY (the screws themselves) if set, else the probe points of
+  // Z_STEPPER_ALIGN_XY / Z_STEPPERS_ORIENTATION, pushed out past the nearest bed edge.
+  // Independent Z steppers tilt the bed about these points.
+  static std::vector<glm::vec2> z_drive_xy();
+
   // Per-frame look of hotend h's heater block and nozzle, applied by the lit shader:
   // tint.rgb blended in by tint.a, plus a 'glow' brightness for the active hotend.
   void set_hotend_look(const int h, const glm::vec4 tint, const float glow);
@@ -101,7 +108,11 @@ private:
   // Bed probe (X1 carriage / effector): a bracket from the part's nearest point (carriage-local XZ)
   // at a height within [mount_lo, mount_hi], and the body, lifted by pose.probe_raise
   void add_probe(std::function<glm::vec2(glm::vec2)> nearest, const float mount_lo, const float mount_hi);
-  void x_travel(float& lo, float& hi) const;  // X range the carriage(s) can reach, for sizing the X axis
+  void x_travel(float& lo, float& hi) const;  // X range the nozzles can reach (IDEX: X1 min to the X2 endstop)
+  // Carriage-local X extent of carriage c: its hotends plus 'margin' each side, and the probe on X1
+  void carriage_span(const int c, const float margin, float& lo, float& hi) const;
+  // World X of the carriages' outermost sides at the ends of X travel, to size the X axis around them
+  void carriage_reach(const float margin, float& left, float& right) const;
   void build_bedslinger();
   void build_cube();
   void build_delta();

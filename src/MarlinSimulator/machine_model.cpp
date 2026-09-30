@@ -147,6 +147,16 @@ static void add_hotend_cold(VertexBuffer& buf, const glm::vec3 at) {
 static void move_to(renderer::Mesh& m, const glm::vec3 pos) { m.m_position = pos; }
 
 //
+// Parts shared by the printer models
+//
+constexpr float nema17 = 42;  // NEMA17 motor body (a cube, for simplicity)
+
+static void add_motor(VertexBuffer& b, const glm::vec3 center) { add_block(b, center, glm::vec3(nema17), color::dark); }
+static void add_motor_facing(VertexBuffer& b, const glm::vec3 center, const glm::vec3 facing) {
+  add_block_facing(b, center, facing, glm::vec3(nema17), color::dark);
+}
+
+//
 // Hotends on the carriage(s), one per HOTEND at motion.hotend_offset (M218 / EEPROM), read via
 // hotend_offset_mm() in KinematicSystem.cpp, which also puts each extruder's nozzle there.
 //
@@ -231,6 +241,33 @@ void MachineModel::x_travel(float& lo, float& hi) const {
   #endif
 }
 
+// Carriage-local X extent of carriage c: 'margin' past its outermost hotends, and on X1 the probe bracket
+void MachineModel::carriage_span(const int c, const float margin, float& lo, float& hi) const {
+  glm::vec3 elo, ehi;
+  hotend_extent(elo, ehi, c);
+  lo = elo.x - margin;
+  hi = ehi.x + margin;
+  if (c == 0 && has_probe()) {
+    lo = std::min(lo, probe_layout.x - 5);  // The probe bracket reaches 5mm past the probe center
+    hi = std::max(hi, probe_layout.x + 5);
+  }
+}
+
+// World X of the carriages' outer sides at the ends of X travel: X1 at its minimum on the left,
+// and X2 at its endstop (IDEX) or X1 at X_MAX_POS on the right
+void MachineModel::carriage_reach(const float margin, float& left, float& right) const {
+  float lo, hi;
+  carriage_span(0, margin, lo, hi);
+  #if ENABLED(DUAL_X_CARRIAGE)
+    left = float(X1_MIN_POS) + lo;
+    carriage_span(1, margin, lo, hi);
+    right = dxc_x2_endstop() + hi;
+  #else
+    left = float(X_MIN_POS) + lo;
+    right = float(X_MAX_POS) + hi;
+  #endif
+}
+
 //
 // Machine dimensions from the Marlin configuration
 //
@@ -238,6 +275,66 @@ static constexpr float bed_x = X_BED_SIZE, bed_y = Y_BED_SIZE, bed_z = Z_MAX_POS
 // Top of the modeled bed plates, just under the bed surface mesh (at Y = 0, where the
 // nozzle tip is at Z0) so the nozzle visibly meets the bed without depth fighting.
 static constexpr float bed_top = -0.3f;
+
+//
+// Z drives of the Cube's bed, one per Z stepper, in Marlin XY.
+//
+// The screw positions aren't in the config directly, but the G34 (Z_STEPPER_AUTO_ALIGN) settings
+// describe them: Z_STEPPER_ALIGN_STEPPER_XY gives the screws themselves, and otherwise each probe
+// point of Z_STEPPER_ALIGN_XY (or the default points from Z_STEPPERS_ORIENTATION, as computed in
+// z_stepper_align.cpp) sits near its stepper, so its screw is placed just past the nearest bed edge.
+// With one Z stepper the screw is centered behind the bed.
+//
+std::vector<glm::vec2> MachineModel::z_drive_xy() {
+  constexpr float out = 30;       // Screw center past the bed edge (bed plate lip 10mm + nut collar 10mm + 10mm)
+  std::vector<glm::vec2> xy;
+  #if NUM_Z_STEPPERS < 2
+    xy.push_back({ bed_x * 0.5f, bed_y + out });
+  #else
+    #if HAS_Z_STEPPER_ALIGN_STEPPER_XY
+      constexpr xy_pos_t pts[] = Z_STEPPER_ALIGN_STEPPER_XY;
+      for (const auto& p : pts) xy.push_back({ float(p.x), float(p.y) });
+    #elif defined(Z_STEPPER_ALIGN_XY)
+      constexpr xy_pos_t pts[] = Z_STEPPER_ALIGN_XY;
+      for (const auto& p : pts) xy.push_back({ float(p.x), float(p.y) });
+    #else
+      // Marlin's default points, with the probe's reach approximated by the probing margins
+      #ifdef Z_STEPPERS_ORIENTATION
+        constexpr int o = Z_STEPPERS_ORIENTATION;
+      #else
+        constexpr int o = 0;
+      #endif
+      const float l = PROBING_MARGIN_LEFT, r = bed_x - (PROBING_MARGIN_RIGHT),
+                  f = PROBING_MARGIN_FRONT, k = bed_y - (PROBING_MARGIN_BACK),
+                  cx = bed_x * 0.5f, cy = bed_y * 0.5f;
+      const glm::vec2 sw { l, f }, nw { l, k }, ne { r, k }, se { r, f };
+      UNUSED(sw); UNUSED(nw); UNUSED(ne); UNUSED(se); UNUSED(cx); UNUSED(cy);
+      #if NUM_Z_STEPPERS == 2
+        if (o) xy = { { cx, f }, { cx, k } };   // Front and back
+        else   xy = { { l, cy }, { r, cy } };   // Left and right
+      #elif NUM_Z_STEPPERS == 3
+        switch (o) {                            // Two corners and the middle of the opposite side
+          default: xy = { sw, se, { cx, k } }; break;
+          case 1:  xy = { nw, sw, { r, cy } }; break;
+          case 2:  xy = { ne, nw, { cx, f } }; break;
+          case 3:  xy = { se, ne, { l, cy } }; break;
+        }
+      #else
+        const glm::vec2 ring[4] = { sw, nw, ne, se };   // Clockwise from the first corner
+        for (int i = 0; i < 4; ++i) xy.push_back(ring[(o + i) % 4]);
+      #endif
+    #endif
+    // Screws under (or too close to) the bed move out past the nearest bed edge, preferring the sides
+    constexpr float clear = 20;
+    for (auto& p : xy) {
+      if (p.x <= -clear || p.x >= bed_x + clear || p.y <= -clear || p.y >= bed_y + clear) continue;
+      const float dl = p.x, dr = bed_x - p.x, df = p.y, db = bed_y - p.y;
+      if (std::min(dl, dr) <= std::min(df, db)) p.x = dl <= dr ? -out : bed_x + out;
+      else                                      p.y = df <= db ? -out : bed_y + out;
+    }
+  #endif
+  return xy;
+}
 
 DeltaGeometry MachineModel::default_delta() {
   #if ENABLED(DELTA)
@@ -437,64 +534,114 @@ void MachineModel::update(const MachinePose& p) {
 // 8mm smooth rod beside each screw on the motor mount. The X ends carry the
 // Z-rod bearings and the screw nuts, so each nut trap sits over its motor's center.
 //
-void MachineModel::build_bedslinger() {
+// Assembly, left (s = 0) and right (s = 1) mirrored with in(s) pointing toward the bed:
+//   Frame (fixed):  two side frames (Y base leg + Z upright) joined by the front and back cross
+//                   members and the top bar; Y rods on printed corners; the Y motor at the back;
+//                   and a Z drive (motor, mount, screw, rod, Z top) on each upright.
+//   Bed (Y):        carriage plate, heated bed and Y bearing blocks.
+//   X axis (Z):     an X end on each Z rod, the X rods between them, and the X motor(s).
+//   Carriages (XZ): one plate per X carriage holding its hotends, and the probe on X1.
+//
+namespace bedslinger {
   constexpr float screw_gap = 17;       // Z screw to Z rod (X ends put the nut 17mm outboard of the bearing)
   constexpr float rod_clear = 45;       // Minimum Z rod distance outside the X travel (clears the X carriage)
-  constexpr float motor = 42;           // NEMA17 body
-  constexpr float screw_r = 4, zrod_r = 5, yrod_r = 4; // 8mm Z screws, 10mm Z rods, 8mm Y rods
+  constexpr float screw_r = 4, zrod_r = 5, yrod_r = 4, xrod_r = 4; // 8mm Z screws, 10mm Z rods, 8mm Y and X rods
   constexpr float w = 20;               // Frame member width
-  constexpr float xend_lo = 15, xend_hi = 90;         // X-end bottom and top above the nozzle tip
-  constexpr float xrod_lo = 30, xrod_hi = 75;         // X rod heights above the nozzle tip
-  constexpr float yrod_y = -35;                       // Y rod height (below the bed carriage)
-  const float yc = bed_y * 0.5f;                      // Nozzle plane is at world Z = -yc
-  const float xrod_z = -yc - 22;                      // X rods, through the middle of the carriage
-  const float rz = xrod_z - 20;                       // Z rods and screws, behind the X rods
-  const float fz = rz - 32;                           // Frame plate, just behind the Z motors
-  const float front = yc + 40, back = -bed_y - yc - 40; // Y legs span the bed travel
+  constexpr float xend_lo = 15, xend_hi = 90;   // X-end bottom and top above the nozzle tip
+  constexpr float xrod_lo = 30, xrod_hi = 75;   // X rod heights above the nozzle tip
+  constexpr float yrod_y = -35;                 // Y rod height (below the bed carriage)
+  constexpr float motor_top = -18;              // Z motor tops, just under the bed carriage
+  constexpr float mount_top = -10;              // Z motor mount tops; the screws and rods start here
 
-  // Frame: two side frames, each a Y base leg with the Z upright standing on it,
-  // joined by front/back base cross members and the top bar. Everything is placed
-  // from the bed size, X travel (IDEX parks X2 past the bed) and Z height, so the printer follows the config.
+  static float in(const int s) { return s ? -1.0f : 1.0f; }  // Toward the bed from side s
+
+  // Frame layout from the bed size, X travel (IDEX parks X2 past the bed) and Z height
+  struct Layout {
+    float xrod_z, rz, fz;         // X rods, Z rods / screws, and frame plate depths (GL Z)
+    float front, back;            // Y legs span the bed travel
+    float xl, xr;                 // Frame outer edges
+    float leg[2], screw[2], rod[2];
+    float base_top, bar_lo, bar_mid;
+    Layout(const float tx0, const float tx1) {
+      const float yc = bed_y * 0.5f;              // Nozzle plane is at world Z = -yc
+      xrod_z = -yc - 22;                          // X rods, through the middle of the carriage
+      rz = xrod_z - 20;                           // Z rods and screws, behind the X rods
+      fz = rz - 32;                               // Frame plate, just behind the Z motors
+      front = yc + 40; back = -bed_y - yc - 40;
+      constexpr float side = rod_clear + screw_gap + nema17 * 0.5f + 25;  // Frame outer edge to the X travel
+      xl = tx0 - side; xr = tx1 + side;
+      leg[0] = xl; leg[1] = xr - w;               // Left edge of each side frame
+      for (int s = 0; s < 2; ++s) {
+        screw[s] = leg[s] + w * 0.5f;             // Z motors and screws are centered on the uprights,
+        rod[s] = screw[s] + in(s) * screw_gap;    // and the Z rods are just inboard
+      }
+      base_top = motor_top - nema17 - 4;          // Top of the base, just under the Z motors
+      bar_lo = bed_z + xend_hi + 70;              // Underside of the top bar
+      bar_mid = bar_lo + w * 0.5f;                // Z tops are centered on the top bar
+    }
+  };
+
+  // Side frame: a Y base leg with the Z upright standing on it
+  static void add_side_frame(VertexBuffer& b, const Layout& lay, const int s) {
+    add_box(b, {lay.leg[s], lay.base_top - w, lay.back}, {lay.leg[s] + w, lay.base_top, lay.front}, color::frame);
+    add_box(b, {lay.leg[s], lay.base_top, lay.fz - w * 0.5f}, {lay.leg[s] + w, lay.bar_lo, lay.fz + w * 0.5f}, color::frame);
+  }
+
+  // Front and back cross members joining the base legs, and the top bar joining the uprights
+  static void add_cross_members(VertexBuffer& b, const Layout& lay) {
+    add_box(b, {lay.xl + w, lay.base_top - w, lay.front - w}, {lay.xr - w, lay.base_top, lay.front}, color::frame);
+    add_box(b, {lay.xl + w, lay.base_top - w, lay.back}, {lay.xr - w, lay.base_top, lay.back + w}, color::frame);
+    add_box(b, {lay.xl, lay.bar_lo, lay.fz - w * 0.5f}, {lay.xr, lay.bar_lo + w, lay.fz + w * 0.5f}, color::frame);
+  }
+
+  // Y smooth rod at x, held by printed Y corners standing on the front and back cross members
+  static void add_y_rod(VertexBuffer& b, const Layout& lay, const float x) {
+    add_cylinder(b, {x, yrod_y, lay.back + w * 0.5f}, {x, yrod_y, lay.front - w * 0.5f}, yrod_r, color::rod);
+    add_box(b, {x - 10, lay.base_top, lay.front - w}, {x + 10, yrod_y + 8, lay.front}, color::printed);
+    add_box(b, {x - 10, lay.base_top, lay.back}, {x + 10, yrod_y + 8, lay.back + w}, color::printed);
+  }
+
+  // Z drive on side s: the motor centered on the upright under its screw, a printed mount that
+  // caps the motor, holds the Z rod and fastens to the upright, the screw and rod running up to
+  // the middle of the top bar, and the Z top there, reaching 1cm past the Z rod.
+  static void add_z_drive(VertexBuffer& b, const Layout& lay, const int s) {
+    add_motor(b, {lay.screw[s], motor_top - nema17 * 0.5f, lay.rz});
+    add_box(b, {lay.screw[s] - in(s) * (nema17 * 0.5f + 2), motor_top, lay.fz}, {lay.rod[s] + in(s) * (zrod_r + 8), mount_top, lay.rz + nema17 * 0.5f + 2}, color::printed);
+    add_cylinder(b, {lay.screw[s], mount_top, lay.rz}, {lay.screw[s], lay.bar_mid, lay.rz}, screw_r, color::screw);
+    add_cylinder(b, {lay.rod[s], mount_top, lay.rz}, {lay.rod[s], lay.bar_mid, lay.rz}, zrod_r, color::rod);
+    add_box(b, {lay.screw[s] - in(s) * 12, lay.bar_mid - 8, lay.fz}, {lay.rod[s] + in(s) * (zrod_r + 10), lay.bar_mid + 8, lay.rz + zrod_r + 10}, color::printed);
+  }
+
+  // X end on side s (relative to the nozzle height): a bearing body around the Z rod reaching
+  // forward to clamp the X rods, and a nut trap over the screw (and the Z motor center) reaching
+  // outboard from the bearing body. The nut sits in the trap with its top 2mm proud.
+  static void add_x_end(VertexBuffer& b, const Layout& lay, const int s) {
+    constexpr float trap_h = 18, nut_h = 6, nut_proud = 2;
+    add_box(b, {lay.rod[s] - 12, xend_lo, lay.rz - 12}, {lay.rod[s] + 12, xend_hi, lay.xrod_z + 10}, color::printed);
+    add_box(b, {lay.screw[s] - in(s) * 11, xend_lo, lay.rz - 11}, {lay.rod[s] - in(s) * 12, xend_lo + trap_h, lay.rz + 11}, color::printed);
+    add_cylinder(b, {lay.screw[s], xend_lo + trap_h + nut_proud - nut_h, lay.rz}, {lay.screw[s], xend_lo + trap_h + nut_proud, lay.rz}, 7.5f, color::rod, 6);
+  }
+
+  // X motor on the X end of side s, outboard of the Z screw, 2cm behind the X rod plane
+  static void add_x_motor(VertexBuffer& b, const Layout& lay, const int s) {
+    add_motor(b, {lay.screw[s] - in(s) * 14, (xrod_lo + xrod_hi) * 0.5f, lay.xrod_z - 10 + nema17 * 0.5f});
+  }
+}
+
+void MachineModel::build_bedslinger() {
+  using namespace bedslinger;
   float tx0, tx1;
   x_travel(tx0, tx1);
-  constexpr float side = rod_clear + screw_gap + motor * 0.5f + 25;  // Frame outer edge to the X travel
-  const float xl = tx0 - side, xr = tx1 + side;       // Frame outer edges
-  const float leg[2] = { xl, xr - w };                // Left edge of each side frame
-  // Z motors and screws are centered on the uprights; the Z rods are just inboard
-  const float screw[2] = { leg[0] + w * 0.5f, leg[1] + w * 0.5f };
-  const float rod[2] = { screw[0] + screw_gap, screw[1] - screw_gap };
-  const float base_top = -18 - motor - 4;             // Top of the base, just under the Z motors
-  const float bar_lo = bed_z + xend_hi + 70;          // Underside of the top bar
-  const float bar_mid = bar_lo + w * 0.5f;            // Z tops are centered on the top bar
+  const Layout lay(tx0, tx1);
 
+  // Frame. Small bedslingers have a single Y motor; both Z drives are drawn even with one
+  // Z stepper, as the two motors are often wired to the same driver.
   add_part([&](VertexBuffer& b) {
-    for (int s = 0; s < 2; ++s) {
-      add_box(b, {leg[s], base_top - w, back}, {leg[s] + w, base_top, front}, color::frame);   // Y base leg
-      add_box(b, {leg[s], base_top, fz - w * 0.5f}, {leg[s] + w, bar_lo, fz + w * 0.5f}, color::frame); // Z upright
-    }
-    add_box(b, {xl + w, base_top - w, front - w}, {xr - w, base_top, front}, color::frame);    // Front cross member
-    add_box(b, {xl + w, base_top - w, back}, {xr - w, base_top, back + w}, color::frame);      // Back cross member
-    add_box(b, {xl, bar_lo, fz - w * 0.5f}, {xr, bar_lo + w, fz + w * 0.5f}, color::frame);    // Top bar
-    // Y smooth rods, held by printed Y corners standing on the front/back cross members
-    for (const float x : { bed_x * 0.3f, bed_x * 0.7f }) {
-      add_cylinder(b, {x, yrod_y, back + w * 0.5f}, {x, yrod_y, front - w * 0.5f}, yrod_r, color::rod);
-      add_box(b, {x - 10, base_top, front - w}, {x + 10, yrod_y + 8, front}, color::printed);
-      add_box(b, {x - 10, base_top, back}, {x + 10, yrod_y + 8, back + w}, color::printed);
-    }
-    // Y motor, on the back cross member, flush with the back of the frame
-    add_block(b, {bed_x * 0.5f, base_top + motor * 0.5f, back + motor * 0.5f}, {motor, motor, motor}, color::dark);
-    for (int s = 0; s < 2; ++s) {
-      const float in = s ? -1.0f : 1.0f;  // Toward the bed
-      // Z motor, centered on the upright, under the screw
-      add_block(b, {screw[s], -18 - motor * 0.5f, rz}, {motor, motor, motor}, color::dark);
-      // Z motor mount: caps the motor, holds the Z rod, and fastens to the upright
-      add_box(b, {screw[s] - in * (motor * 0.5f + 2), -18, fz}, {rod[s] + in * (zrod_r + 8), -10, rz + motor * 0.5f + 2}, color::printed);
-      // Z screw from the motor shaft; Z rod from the motor mount; both run up to the middle of the top bar
-      add_cylinder(b, {screw[s], -10, rz}, {screw[s], bar_mid, rz}, screw_r, color::screw);
-      add_cylinder(b, {rod[s], -10, rz}, {rod[s], bar_mid, rz}, zrod_r, color::rod);
-      // Z top: centered on the top bar, reaching 1cm past the Z rod
-      add_box(b, {screw[s] - in * 12, bar_mid - 8, fz}, {rod[s] + in * (zrod_r + 10), bar_mid + 8, rz + zrod_r + 10}, color::printed);
-    }
+    for (int s = 0; s < 2; ++s) add_side_frame(b, lay, s);
+    add_cross_members(b, lay);
+    for (const float x : { bed_x * 0.3f, bed_x * 0.7f }) add_y_rod(b, lay, x);
+    add_motor(b, {bed_x * 0.5f, lay.base_top + nema17 * 0.5f, lay.back + nema17 * 0.5f}); // Y motor, flush with the back
+    for (int s = 0; s < 2; ++s) add_z_drive(b, lay, s);
   });
 
   // Bed carriage, Y bearing blocks on the Y rods, and heated bed, which slide on Y
@@ -506,26 +653,13 @@ void MachineModel::build_bedslinger() {
         add_box(b, {x - 11, yrod_y - yrod_r - 4, z - 17}, {x + 11, -16, z + 17}, color::printed);
   }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.bed_offset); });
 
-  // X axis: X ends (Z bearing + nut trap), X rods and X motor, which ride Z
+  // X axis, which rides Z: X ends, X rods, and the X motor on the left X end.
+  // IDEX drives the X2 carriage with its own motor on the right X end.
   add_part([&](VertexBuffer& b) {
-    for (int s = 0; s < 2; ++s) {
-      const float in = s ? -1.0f : 1.0f;
-      // Bearing body around the Z rod, reaching forward to clamp the X rods
-      add_box(b, {rod[s] - 12, xend_lo, rz - 12}, {rod[s] + 12, xend_hi, xrod_z + 10}, color::printed);
-      // Nut trap over the screw (and the Z motor center), reaching outboard from the
-      // bearing body. The nut sits in the trap with its top 2mm proud.
-      constexpr float trap_h = 18, nut_h = 6, nut_proud = 2;
-      add_box(b, {screw[s] - in * 11, xend_lo, rz - 11}, {rod[s] - in * 12, xend_lo + trap_h, rz + 11}, color::printed);
-      add_cylinder(b, {screw[s], xend_lo + trap_h + nut_proud - nut_h, rz}, {screw[s], xend_lo + trap_h + nut_proud, rz}, 7.5f, color::rod, 6);
-    }
-    add_cylinder(b, {rod[0], xrod_lo, xrod_z}, {rod[1], xrod_lo, xrod_z}, 4, color::rod);
-    add_cylinder(b, {rod[0], xrod_hi, xrod_z}, {rod[1], xrod_hi, xrod_z}, 4, color::rod);
-    // X motor on the left X end, outboard of the Z screw, 2cm behind the X rod plane.
-    // IDEX drives the X2 carriage with its own motor on the right X end.
-    for (int s = 0; s < carriage_count(); ++s) {
-      const float in = s ? -1.0f : 1.0f;
-      add_block(b, {screw[s] - in * 14, (xrod_lo + xrod_hi) * 0.5f, xrod_z - 10 + motor * 0.5f}, {motor, motor, motor}, color::dark);
-    }
+    for (int s = 0; s < 2; ++s) add_x_end(b, lay, s);
+    for (const float y : { xrod_lo, xrod_hi })
+      add_cylinder(b, {lay.rod[0], y, lay.xrod_z}, {lay.rod[1], y, lay.xrod_z}, xrod_r, color::rod);
+    for (int s = 0; s < carriage_count(); ++s) add_x_motor(b, lay, s);
   }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, {0, p.nozzle_world.y, 0}); });
 
   // X carriage(s) and the hotends' cold ends, which follow their nozzles.
@@ -555,87 +689,229 @@ void MachineModel::build_bedslinger() {
 }
 
 //
-// Cube (CoreXY style): head moves in XY at the top, bed moves down on Z
+// Cube (Z-bed): the head moves in XY at the top on an X gantry riding two Y rails, and the bed
+// moves down on Z.
 //
+// Assembly (GL: X right, Y up, Z toward the front):
+//   Frame (fixed):  a box of extrusions (uprights + top and bottom rings), a Y rail on each side
+//                   with mounts at the uprights, and the XY motors in the back top corners.
+//                   Each Z drive (motor on the bottom ring, lead screw up to a bearing bracket
+//                   on a beam across that side of the frame) sits where the bed attaches.
+//   Bed (Z):        the bed plate, with a collar on each Z screw (and guide rod) and an arm
+//                   from the collar into the plate. Z drives come from z_drive_xy(), so a
+//                   multi-Z bed is held at its G34 alignment points and could tilt about them.
+//   Gantry (Y):     X rods between two gantry ends (Y blocks) on the Y rails. The ends' inner
+//                   faces meet the toolheads' outer sides at the ends of X travel. Non-Core
+//                   (Cartesian) machines drive Y from a motor on the far gantry end, and on both
+//                   ends when there's a Y2 stepper; a single Y driver may drive both.
+//   Toolheads (XY): one per X carriage (two with IDEX), and the probe on X1.
+//
+namespace cube {
+  constexpr float w = 20;                           // Frame member width
+  constexpr float rod_r = 4;                        // 8mm Y rails and X rods
+  constexpr float zrod_r = 6, zscrew_r = 5;         // 12mm Z guide rods, 10mm Z lead screws
+  constexpr float collar_r = 10, collar_lo = -24, collar_hi = -4; // Bed collars (Z nuts / bearings)
+  constexpr float arm_lo = -14, arm_hi = -9;        // Bed arms, from the collars into the bed plate
+  constexpr float plate_lip = 10;                   // Bed plate margin around the bed
+  constexpr float end_half = 15;                    // Gantry end half-width (X)
+  constexpr float end_depth = 30;                   // Gantry end half-depth (Z)
+  constexpr float xrod_dz = 14;                     // X rods in front of / behind the carriage center
+  constexpr float head_margin = 28;                 // Toolhead sides past the outermost hotends
+  constexpr float rail_top_gap = 55;                // Y rails above the bed at its top
+  constexpr float xrod_rise = 15;                   // X rods above the Y rails
+
+  static float in(const int s) { return s ? -1.0f : 1.0f; }  // Toward the center from left (0) / right (1)
+
+  enum Side : uint8_t { SIDE_LEFT, SIDE_RIGHT, SIDE_BACK, SIDE_FRONT };
+
+  // Outer bounds of the frame box. The inner faces of its members bound everything inside.
+  struct Frame {
+    float x0, x1, y0, y1, z0, z1;
+    float inner(const Side s) const {
+      switch (s) {
+        case SIDE_LEFT:  return x0 + w;
+        case SIDE_RIGHT: return x1 - w;
+        case SIDE_BACK:  return z0 + w;
+        default:    return z1 - w;
+      }
+    }
+    // The side whose inner face is nearest to a point (GL XZ)
+    Side nearest_side(const glm::vec2 p) const {
+      const float d[4] = { p.x - inner(SIDE_LEFT), inner(SIDE_RIGHT) - p.x, p.y - inner(SIDE_BACK), inner(SIDE_FRONT) - p.y };
+      int best = 0;
+      for (int i = 1; i < 4; ++i) if (d[i] < d[best]) best = i;
+      return Side(best);
+    }
+  };
+
+  // Uprights at the corners, and the top and bottom rings
+  static void add_frame_box(VertexBuffer& b, const Frame& fr) {
+    for (const float x : { fr.x0, fr.x1 - w }) for (const float z : { fr.z0, fr.z1 - w })
+      add_box(b, {x, fr.y0, z}, {x + w, fr.y1, z + w}, color::frame);
+    for (const float y : { fr.y0, fr.y1 - w }) {
+      add_box(b, {fr.x0 + w, y, fr.z0}, {fr.x1 - w, y + w, fr.z0 + w}, color::frame);
+      add_box(b, {fr.x0 + w, y, fr.z1 - w}, {fr.x1 - w, y + w, fr.z1}, color::frame);
+      add_box(b, {fr.x0, y, fr.z0 + w}, {fr.x0 + w, y + w, fr.z1 - w}, color::frame);
+      add_box(b, {fr.x1 - w, y, fr.z0 + w}, {fr.x1, y + w, fr.z1 - w}, color::frame);
+    }
+  }
+
+  // A beam across one side of the frame, between its uprights, with its bottom at y
+  static void add_side_beam(VertexBuffer& b, const Frame& fr, const Side s, const float y) {
+    switch (s) {
+      case SIDE_LEFT:  add_box(b, {fr.x0, y, fr.z0 + w}, {fr.x0 + w, y + w, fr.z1 - w}, color::frame); break;
+      case SIDE_RIGHT: add_box(b, {fr.x1 - w, y, fr.z0 + w}, {fr.x1, y + w, fr.z1 - w}, color::frame); break;
+      case SIDE_BACK:  add_box(b, {fr.x0 + w, y, fr.z0}, {fr.x1 - w, y + w, fr.z0 + w}, color::frame); break;
+      case SIDE_FRONT: add_box(b, {fr.x0 + w, y, fr.z1 - w}, {fr.x1 - w, y + w, fr.z1}, color::frame); break;
+    }
+  }
+
+  // Printed bracket from the inner face of the nearest frame side to a point p (GL XZ),
+  // 'half' wide around p, spanning heights [lo, hi]
+  static void add_bracket(VertexBuffer& b, const Frame& fr, const glm::vec2 p, const float lo, const float hi, const float half) {
+    const Side s = fr.nearest_side(p);
+    const float f = fr.inner(s);
+    switch (s) {
+      case SIDE_LEFT:  add_box(b, {f, lo, p.y - half}, {p.x + half, hi, p.y + half}, color::printed); break;
+      case SIDE_RIGHT: add_box(b, {p.x - half, lo, p.y - half}, {f, hi, p.y + half}, color::printed); break;
+      case SIDE_BACK:  add_box(b, {p.x - half, lo, f}, {p.x + half, hi, p.y + half}, color::printed); break;
+      case SIDE_FRONT: add_box(b, {p.x - half, lo, p.y - half}, {p.x + half, hi, f}, color::printed); break;
+    }
+  }
+
+  // Z drive at p (GL XZ): the motor standing on a plate from the bottom ring, and the lead
+  // screw rising from its shaft into a bearing bracket on the side beam at beam_y
+  static void add_z_drive(VertexBuffer& b, const Frame& fr, const glm::vec2 p, const float beam_y) {
+    const float base = fr.y0 + w;                    // Top of the bottom ring
+    add_bracket(b, fr, p, base - 6, base, nema17 * 0.5f + 2);
+    add_motor(b, {p.x, base + nema17 * 0.5f, p.y});
+    add_cylinder(b, {p.x, base + nema17, p.y}, {p.x, beam_y + w - 2, p.y}, zscrew_r, color::screw);
+    add_bracket(b, fr, p, beam_y, beam_y + w, 12);
+  }
+
+  // Z guide rod at p (GL XZ), running between mounts on the bottom and top rings
+  static void add_guide_rod(VertexBuffer& b, const Frame& fr, const glm::vec2 p) {
+    add_cylinder(b, {p.x, fr.y0 + 4, p.y}, {p.x, fr.y1 - 4, p.y}, zrod_r, color::rod);
+    for (const float y : { fr.y0, fr.y1 - w }) add_bracket(b, fr, p, y, y + w, 12);
+  }
+
+  // Y rail on side s at x, running 5mm past the inner faces of the frame's front and back, with
+  // mounts from the side's inner face to the rail ends, in line with the uprights
+  static void add_y_rail(VertexBuffer& b, const Frame& fr, const int s, const float x, const float y) {
+    add_cylinder(b, {x, y, fr.inner(SIDE_BACK) - 5}, {x, y, fr.inner(SIDE_FRONT) + 5}, rod_r, color::rod);
+    const float face = fr.inner(s ? SIDE_RIGHT : SIDE_LEFT);
+    for (const float ze : { fr.z0 + w * 0.5f, fr.z1 - w * 0.5f })
+      add_box(b, {face, y - 10, ze - 10}, {x + in(s) * 10, y + 10, ze + 10}, color::printed);
+  }
+
+  // Bed collar on a Z screw or guide rod at p (GL XZ, bed-relative), and an arm from the
+  // collar to 20mm inside the nearest point of the bed plate
+  static void add_bed_collar(VertexBuffer& b, const glm::vec2 p) {
+    add_cylinder(b, {p.x, collar_lo, p.y}, {p.x, collar_hi, p.y}, collar_r, color::printed);
+    const glm::vec2 edge = glm::clamp(p, glm::vec2(-plate_lip, -bed_y - plate_lip), glm::vec2(bed_x + plate_lip, plate_lip));
+    const glm::vec2 d = edge - p;
+    const float len = glm::length(d);
+    if (len < 1) return;                            // Under the plate: the collar holds it directly
+    const glm::vec2 dir = d / len, mid = p + dir * ((len + 20) * 0.5f);
+    add_block_facing(b, {mid.x, (arm_lo + arm_hi) * 0.5f, mid.y}, {dir.x, 0, dir.y}, {10, arm_hi - arm_lo, len + 20}, color::printed);
+  }
+
+  // Gantry end (Y block) on side s riding the Y rail at x: deeper than it is tall, holding the X rods
+  static void add_gantry_end(VertexBuffer& b, const int s, const float x, const float rail_y, const float xrod_y) {
+    add_box(b, {x - in(s) * end_half, rail_y - 12, -end_depth}, {x + in(s) * end_half, xrod_y + 12, end_depth}, color::printed);
+  }
+
+  // Y motor on a gantry end at x, standing on a riser so its bottom clears the toolheads at 'bottom'
+  static void add_gantry_motor(VertexBuffer& b, const float x, const float riser_lo, const float bottom) {
+    if (bottom > riser_lo) add_box(b, {x - end_half, riser_lo, -nema17 * 0.5f}, {x + end_half, bottom, nema17 * 0.5f}, color::printed);
+    add_motor(b, {x, bottom + nema17 * 0.5f, 0});
+  }
+}
+
 void MachineModel::build_cube() {
-  constexpr float w = 20;                             // Frame member width
-  constexpr float motor = 42;                         // NEMA17 body
-  constexpr float rod_r = 4;                          // 8mm rods
-  constexpr float zrod_r = 6, zscrew_r = 5;           // 12mm Z rods, 10mm Z lead screw
-  float tx0, tx1;
-  x_travel(tx0, tx1);                                 // IDEX parks X2 past the bed, so the gantry reaches it
-  const float x0 = tx0 - 60, x1 = tx1 + 60, y0 = -60, y1 = bed_z + 110, z0 = -bed_y - 60, z1 = 60;
-  const float top = bed_z + 55;                       // Y rail height
-  const float xrod_y = top + 15;                      // X rods, side by side, above the Y rails
-  constexpr float xrod_dz = 14;                       // X rods in front of / behind the carriage center
-  const float yrail[2] = { tx0 - 30, tx1 + 30 };
-  const float in_face[2] = { x0 + w, x1 - w };        // Inner faces of the left / right frame sides
-  const float zr = z0 + w + 10;                       // Z rods and screw, just in front of the back frame
-  const float zrod_top = y1 - 4;                      // Z rods end inside their top mounts
+  using namespace cube;
+  constexpr bool is_core = ANY(IS_CORE, MARKFORGED_XY, MARKFORGED_YX);
+  const float rail_y = bed_z + rail_top_gap;          // Y rail height
+  const float xrod_y = rail_y + xrod_rise;            // X rods, side by side, above the Y rails
+
+  // Toolheads, carriage-local: each spans its hotends plus head_margin, and the depth of every hotend
+  glm::vec3 all_lo, all_hi;
+  hotend_extent(all_lo, all_hi);
+  const float head_top = bed_z + all_hi.y + 85;       // World height of the toolhead tops
+
+  // Gantry ends, whose inner faces meet the toolheads' outer sides at the ends of X travel
+  float reach_l, reach_r;
+  carriage_reach(head_margin, reach_l, reach_r);
+  const float yrail[2] = { reach_l - end_half, reach_r + end_half };
+
+  // Cartesian Y motor(s) on the gantry ends, raised to clear the toolheads
+  const float gm_bottom = std::max(xrod_y + 12, head_top + 2);
+
+  // Z drives (GL XZ), and with a single Z stepper two guide rods beside its screw
+  std::vector<glm::vec2> zd;
+  for (const auto& p : z_drive_xy()) zd.push_back({ p.x, -p.y });
+  std::vector<glm::vec2> guides;
+  if (zd.size() == 1) guides = { { bed_x * 0.25f, zd[0].y }, { bed_x * 0.75f, zd[0].y } };
+
+  // Frame: inner faces just outside everything inside it (Y rails, bed plate, Z drives, gantry travel)
+  float in_l = std::min(yrail[0] - 10, -plate_lip - 2), in_r = std::max(yrail[1] + 10, bed_x + plate_lip + 2);
+  float in_b = std::min({ -float(Y_MAX_POS) - end_depth - 10, -float(Y_MAX_POS) + all_lo.z - head_margin - 10, -bed_y - plate_lip - 2 });
+  float in_f = std::max({ -float(Y_MIN_POS) + end_depth + 10, -float(Y_MIN_POS) + all_hi.z + head_margin + 10, plate_lip + 2 });
+  for (const auto& p : zd) {
+    constexpr float r = nema17 * 0.5f + 2;
+    in_l = std::min(in_l, p.x - r); in_r = std::max(in_r, p.x + r);
+    in_b = std::min(in_b, p.y - r); in_f = std::max(in_f, p.y + r);
+  }
+  Frame fr;
+  fr.x0 = in_l - w; fr.x1 = in_r + w;
+  fr.z0 = in_b - w; fr.z1 = in_f + w;
+  fr.y0 = collar_lo - 2 - nema17 - w;                  // Z motors fit under the bed collars at the bottom
+  fr.y1 = is_core ? bed_z + 110 : std::max(bed_z + 110, gm_bottom + nema17 + 2 + w);
+
+  const float beam_y = bed_z + 5;                     // Side beams holding the Z screw tops, just over the top of the bed travel
 
   add_part([&](VertexBuffer& b) {
-    // Uprights
-    for (const float x : {x0, x1 - w}) for (const float z : {z0, z1 - w})
-      add_box(b, {x, y0, z}, {x + w, y1, z + w}, color::frame);
-    // Top and bottom rings
-    for (const float y : {y0, y1 - w}) {
-      add_box(b, {x0 + w, y, z0}, {x1 - w, y + w, z0 + w}, color::frame);
-      add_box(b, {x0 + w, y, z1 - w}, {x1 - w, y + w, z1}, color::frame);
-      add_box(b, {x0, y, z0 + w}, {x0 + w, y + w, z1 - w}, color::frame);
-      add_box(b, {x1 - w, y, z0 + w}, {x1, y + w, z1 - w}, color::frame);
-    }
+    add_frame_box(b, fr);
+    bool beam[4] {};
+    for (const auto& p : zd) beam[fr.nearest_side(p)] = true;
+    for (int s = 0; s < 4; ++s) if (beam[s]) add_side_beam(b, fr, Side(s), beam_y);
+    for (const auto& p : zd) add_z_drive(b, fr, p, beam_y);
+    for (const auto& p : guides) add_guide_rod(b, fr, p);
     for (int s = 0; s < 2; ++s) {
-      const float in = s ? -1.0f : 1.0f;  // Toward the bed
-      // Y rail, running 5mm past the inner faces of the uprights at each end
-      add_cylinder(b, {yrail[s], top, z0 + w - 5}, {yrail[s], top, z1 - w + 5}, rod_r, color::rod);
-      // Y rail mounts, from the inner face of each upright to the rail end, in line with the uprights
-      for (const float ze : {z0 + w * 0.5f, z1 - w * 0.5f})
-        add_box(b, {in_face[s], top - 10, ze - 10}, {yrail[s] + in * 10, top + 10, ze + 10}, color::printed);
+      add_y_rail(b, fr, s, yrail[s], rail_y);
       // XY motors in the back corners, bottoms level with the underside of the top ring
-      add_block(b, {in_face[s] + in * motor * 0.5f, y1 - w + motor * 0.5f, z0 + w + motor * 0.5f}, {motor, motor, motor}, color::dark);
+      if (is_core) add_motor(b, {fr.inner(s ? SIDE_RIGHT : SIDE_LEFT) + in(s) * nema17 * 0.5f, fr.y1 - w + nema17 * 0.5f, fr.inner(SIDE_BACK) + nema17 * 0.5f});
     }
-    // Z rods, with top and bottom mounts fastened to the inside of the back crossbeams, in line with them
-    for (const float x : { bed_x * 0.25f, bed_x * 0.75f }) {
-      add_cylinder(b, {x, y0 + 4, zr}, {x, zrod_top, zr}, zrod_r, color::rod);
-      for (const float y : { y0, y1 - w })
-        add_box(b, {x - 12, y, z0 + w}, {x + 12, y + w, zr + zrod_r + 6}, color::printed);
-    }
-    // Z motor, with the lead screw rising from its shaft to just under the top crossbeam
-    add_block(b, {bed_x * 0.5f, y0 + w + motor * 0.5f, zr}, {motor, motor, motor}, color::dark);
-    add_cylinder(b, {bed_x * 0.5f, y0 + w + motor, zr}, {bed_x * 0.5f, y1 - w - 2, zr}, zscrew_r, color::screw);
+    // Cartesian X motor in the left back corner, and an X2 motor (IDEX or dual X steppers) in the right
+    if (!is_core) for (int s = 0; s < (ENABLED(HAS_X2_STEPPER) ? 2 : 1); ++s)
+      add_motor(b, {fr.inner(s ? SIDE_RIGHT : SIDE_LEFT) + in(s) * nema17 * 0.5f, fr.y1 - w + nema17 * 0.5f, fr.inner(SIDE_BACK) + nema17 * 0.5f});
   });
 
-  // Bed, which rides Z
+  // Bed, which rides Z: the plate, and a collar and arm at every Z screw and guide rod
   add_part([&](VertexBuffer& b) {
-    add_box(b, {-10, -9, -bed_y - 10}, {bed_x + 10, bed_top, 10}, color::bed);
-    // Bed arms under the bed, 10mm wide and 5mm tall, from each Z rod to the middle of the bed
-    for (const float x : { bed_x * 0.25f, bed_x * 0.75f })
-      add_box(b, {x - 5, -14, zr - zrod_r - 2}, {x + 5, -9, -bed_y * 0.5f}, color::printed);
-    // Collars on the Z rods and the lead screw (nut at the center), with a tab to the bed
-    for (const float x : { bed_x * 0.25f, bed_x * 0.5f, bed_x * 0.75f })
-      add_cylinder(b, {x, -24, zr}, {x, -4, zr}, 10, color::printed);
-    add_box(b, {bed_x * 0.5f - 5, -14, zr + 9}, {bed_x * 0.5f + 5, -9, -bed_y - 10}, color::printed);
+    add_box(b, {-plate_lip, -9, -bed_y - plate_lip}, {bed_x + plate_lip, bed_top, plate_lip}, color::bed);
+    for (const auto& p : zd) add_bed_collar(b, p);
+    for (const auto& p : guides) add_bed_collar(b, p);
   }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.bed_offset); });
 
-  // X gantry, which follows the nozzle on Y: two X rods side by side (front and back)
-  // and the Y blocks riding the Y rails, deeper than they are tall
+  // X gantry, which follows the nozzle on Y: two X rods side by side (front and back) between
+  // the gantry ends, and on Cartesian machines the Y motor on the far end (both ends with Y2)
   add_part([&](VertexBuffer& b) {
     for (const float dz : { -xrod_dz, xrod_dz })
       add_cylinder(b, {yrail[0], xrod_y, dz}, {yrail[1], xrod_y, dz}, rod_r, color::rod);
-    for (int s = 0; s < 2; ++s) {
-      const float in = s ? -1.0f : 1.0f;
-      add_box(b, {yrail[s] - in * 15, top - 12, -30}, {yrail[s] + in * 15, xrod_y + 12, 30}, color::printed);
+    for (int s = 0; s < 2; ++s) add_gantry_end(b, s, yrail[s], rail_y, xrod_y);
+    if (!is_core) {
+      add_gantry_motor(b, yrail[1], xrod_y + 12, gm_bottom);
+      if (ENABLED(HAS_Y2_STEPPER)) add_gantry_motor(b, yrail[0], xrod_y + 12, gm_bottom);
     }
   }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, {0, 0, p.nozzle_world.z}); });
 
   // Toolhead(s), which follow their nozzles (at the top of the bed travel), each enclosing its hotends' heatsinks.
   // With IDEX both toolheads ride the same X rods, so each spans the depth of every hotend.
-  glm::vec3 all_lo, all_hi;
-  hotend_extent(all_lo, all_hi);
   for (int c = 0; c < carriage_count(); ++c) {
     glm::vec3 lo, hi;
     hotend_extent(lo, hi, c);
-    const glm::vec3 blo { lo.x - 28, lo.y + 30, all_lo.z - 28 }, bhi { hi.x + 28, hi.y + 85, all_hi.z + 28 };
+    const glm::vec3 blo { lo.x - head_margin, lo.y + 30, all_lo.z - head_margin }, bhi { hi.x + head_margin, hi.y + 85, all_hi.z + head_margin };
     add_part([&](VertexBuffer& b) {
       add_box(b, blo, bhi, color::printed);
       add_cold_ends(b, c);
@@ -653,16 +929,37 @@ void MachineModel::build_cube() {
 //
 // Delta: three towers with carriages, six arms, and an effector
 //
-void MachineModel::build_delta() {
-  constexpr float joint_y = 14;      // Arm joints above the nozzle tip
+// Assembly: each tower (extrusion + motor on top) stands at tower_r, joined by triangles of
+// base and top beams around a round bed. A carriage rides each tower, and a pair of arms runs
+// from its joint bar down to the matching joint bar on the effector, which carries the hotend.
+//
+namespace delta_parts {
   constexpr float arm_spacing = 25;  // Half the gap between paired arms
   constexpr float arm_r = 3;         // Arm (connecting rod) radius
   constexpr float ball_r = 5.5f;     // 11mm ball joints at both ends of every arm
   constexpr float bar_r = 4;         // 8mm bars joining each arm pair (effector and carriages)
   constexpr float bar_half = arm_spacing + arm_r - 1.5f; // Pair gap + arm diameter, less 3mm for the balls
+  constexpr float tower_w = 30, tower_d = 20;            // Tower extrusion: wide face toward the center
+
+  // Joint bar for one arm pair: a bar centered on 'mid' along 'tangent', with a ball joint for each arm
+  static void add_joint_bar(VertexBuffer& b, const glm::vec3 mid, const glm::vec3 tangent, const glm::vec4 col) {
+    add_cylinder(b, mid - tangent * bar_half, mid + tangent * bar_half, bar_r, col, 12);
+    for (const float side : { -1.0f, 1.0f }) add_sphere(b, mid + tangent * (arm_spacing * side), ball_r, color::joint);
+  }
+
+  // Tower at 'column' from height lo to hi, turned so its wide face points at the center (along -out),
+  // with its motor standing on top
+  static void add_tower(VertexBuffer& b, const glm::vec3 column, const glm::vec3 out, const float lo, const float hi) {
+    add_block_facing(b, {column.x, (lo + hi) * 0.5f, column.z}, -out, {tower_w, hi - lo, tower_d}, color::frame);
+    add_motor_facing(b, {column.x, hi + nema17 * 0.5f, column.z}, -out);
+  }
+}
+
+void MachineModel::build_delta() {
+  using namespace delta_parts;
+  constexpr float joint_y = 14;      // Arm joints above the nozzle tip
   const glm::vec2 center { bed_x * 0.5f, bed_y * 0.5f };   // Marlin XY
   const float delta_radius = delta.radius, delta_rod = delta.diagonal_rod;
-  constexpr float tower_w = 30, tower_d = 20;               // Tower extrusion: wide face toward the center
   constexpr float carriage_d = 11;                          // Carriage thickness, front (joints) to back (tower face)
   const float tower_r = delta_radius + 60;                  // Tower columns
   const float carriage_r = tower_r - tower_d * 0.5f - carriage_d; // Carriage joints, on the carriage's front face
@@ -692,19 +989,13 @@ void MachineModel::build_delta() {
     return p.nozzle.z + std::sqrt(std::max(0.0f, delta_rod * delta_rod - glm::dot(d, d)));
   };
 
-  // Frame: towers, base and top triangles, round bed
+  // Frame: towers from the bottom of the base beams to the top of the top beams, the base and top triangles, and the round bed
   add_part([&](VertexBuffer& b) {
     constexpr float base_y = -45;                           // Base beam centerline
     glm::vec3 column[3];
     for (int i = 0; i < 3; ++i) {
       column[i] = c3 + dir[i] * tower_r;
-      // Tower from the bottom of the base beams to the top of the top beams,
-      // turned so its wide face points at the center
-      const float lo = base_y - beam_r, hi = top + beam_r;
-      add_block_facing(b, {column[i].x, (lo + hi) * 0.5f, column[i].z}, -dir[i], {tower_w, hi - lo, tower_d}, color::frame);
-      // Tower motor, standing on top of the tower, centered on it and facing the center
-      constexpr float motor = 42;                           // NEMA17 body
-      add_block_facing(b, {column[i].x, hi + motor * 0.5f, column[i].z}, -dir[i], {motor, motor, motor}, color::dark);
+      add_tower(b, column[i], dir[i], base_y - beam_r, top + beam_r);
     }
     for (int i = 0; i < 3; ++i) {
       const glm::vec3 a = column[i], z = column[(i + 1) % 3];
@@ -714,13 +1005,11 @@ void MachineModel::build_delta() {
     add_cylinder(b, c3 + glm::vec3(0, -9, 0), c3 + glm::vec3(0, bed_top, 0), delta.printable_radius + 10, color::bed, 48);
   });
 
-  // Carriages ride the towers; each faces the center
+  // Carriages ride the towers; each faces the center (local X is along the tower's tangent)
   for (int i = 0; i < 3; ++i) {
     add_part([&](VertexBuffer& b) {
       add_box(b, {-35, -20, 0}, {35, 25, carriage_d}, color::printed);
-      add_cylinder(b, {-bar_half, 0, 0}, {bar_half, 0, 0}, bar_r, color::rod, 12);
-      // Ball joints for the arm pair (local X is along the tower's tangent)
-      for (const float side : {-1.0f, 1.0f}) add_sphere(b, {side * arm_spacing, 0, 0}, ball_r, color::joint);
+      add_joint_bar(b, {0, 0, 0}, {1, 0, 0}, color::rod);
     }, [=](renderer::Mesh& m, const MachinePose& p) {
       const float h = carriage_height(i, p);
       m.m_position = c3 + dir[i] * carriage_r + glm::vec3(0, h + joint_y, 0);
@@ -745,17 +1034,12 @@ void MachineModel::build_delta() {
     }, false);
   }
 
-  // Effector and hotend
+  // Effector and hotend: a plate with a joint bar at each arm pair, placed like the arms' lower
+  // ends (joint_y up, effector_r out along dir, +/-arm_spacing along the tangent)
   add_part([&](VertexBuffer& b) {
     add_cylinder(b, {0, joint_y - 5, 0}, {0, joint_y + 5, 0}, effector_r + 8, color::printed, 6);
-    // At each arm pair: a bar spanning the pair (pair gap + arm diameter) with ball joints at its ends.
-    // Same placement as the arms' lower ends: joint_y up, effector_r out along dir, +/-arm_spacing along the tangent.
-    for (int i = 0; i < 3; ++i) {
-      const glm::vec3 tangent { -dir[i].z, 0, dir[i].x };
-      const glm::vec3 mid = glm::vec3(0, joint_y, 0) + dir[i] * effector_r;
-      add_cylinder(b, mid - tangent * bar_half, mid + tangent * bar_half, bar_r, color::printed, 12);
-      for (const float side : {-1.0f, 1.0f}) add_sphere(b, mid + tangent * (arm_spacing * side), ball_r, color::joint);
-    }
+    for (int i = 0; i < 3; ++i)
+      add_joint_bar(b, glm::vec3(0, joint_y, 0) + dir[i] * effector_r, { -dir[i].z, 0, dir[i].x }, color::printed);
     add_cold_ends(b);
   }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); }, false);
   // The probe mounts to the effector plate's rim
