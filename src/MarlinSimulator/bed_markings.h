@@ -41,4 +41,5 @@ public:
 private:
   std::vector<float> signature;  // The inputs of the last build
   glm::vec4 no_tint {};          // The default shader's u_tint, which must be set per mesh
+  float no_dim = 1;              // ...and u_dim
 };

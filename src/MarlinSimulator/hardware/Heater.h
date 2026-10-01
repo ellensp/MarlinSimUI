@@ -34,7 +34,8 @@ public:
     Normal,
     ForceMin,
     ForceMax,
-    ForcePause
+    ForcePause,
+    Fixed       // Report sensor_fixed_temperature instead of the modeled temperature
   };
 
   Heater(pin_type heater_pin, pin_type adc_pin, heater_data heater, hotend_data hotend, adc_data adc);
@@ -43,6 +44,7 @@ public:
   void update();
   void ui_widget();
   virtual void serialize(agent::JsonWriter& writer) const override;
+  virtual bool apply(const agent::JsonValue& body, std::string& error) override;
 
   pin_type heater_pin, adc_pin;
 
@@ -78,4 +80,6 @@ public:
   double adc_pullup_resistance = 4700;
   uint32_t adc_resolution = 12;
   temperature_sensor_mode m_temperature_sensor_mode {};
+  double sensor_fixed_temperature = 25.0;  // Reading in Fixed mode (C)
+  bool element_ok = true;                  // false = broken heater element: PWM delivers no power
 };

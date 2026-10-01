@@ -219,6 +219,7 @@ public:
   std::vector<std::shared_ptr<class Heater>> hotend_heaters;
   std::shared_ptr<class Heater> bed_heater;
   glm::vec4 bed_tint {}, no_tint {};
+  float bed_dim = 1, no_dim = 1;  // u_dim: 0.5 during the dark phase of a thermal fault blink
   void update_heat_tint(const bool gradient_enabled);
 
   bool mouse_captured = false;

@@ -13,7 +13,7 @@
 
 struct kinematic_state;
 
-namespace agent { class JsonWriter; }
+namespace agent { class JsonWriter; class JsonValue; }
 
 class VirtualPrinter {
 public:
@@ -68,6 +68,23 @@ public:
      */
     virtual bool inject_touch(float rx, float ry, uint32_t hold_ms) {
       (void)rx; (void)ry; (void)hold_ms;
+      return false;
+    }
+
+    /**
+     * Change this component's simulated state for the agent interface -- the
+     * write-side sibling of serialize(). The body is the flat JSON object from
+     * POST /component/<name>, with keys named after the serialize() fields, so
+     * an agent sets e.g. {"filament_present": false} without knowing any pin.
+     *
+     * Return true if at least one key was applied. On a bad value set error and
+     * return false. The default knows no keys, so it reports that.
+     *
+     * Called on the simulation thread.
+     */
+    virtual bool apply(const agent::JsonValue& body, std::string& error) {
+      (void)body;
+      error = "component '" + name + "' has no settable state";
       return false;
     }
 
@@ -142,6 +159,19 @@ public:
   template<typename T>
   static std::shared_ptr<T> get_component(std::string name) {
     return std::static_pointer_cast<T>(component_map[name]);
+  }
+
+  // Look up a component by registry name without creating an empty entry.
+  static std::shared_ptr<Component> find_component(const std::string& name) {
+    auto it = component_map.find(name);
+    return it == component_map.end() ? nullptr : it->second;
+  }
+
+  // Registered components with the given identifier (the class tag, e.g. "Heater").
+  static std::vector<std::shared_ptr<Component>> components_of(const std::string& identifier) {
+    std::vector<std::shared_ptr<Component>> found;
+    for (auto const& c : components) if (c->identifier == identifier) found.push_back(c);
+    return found;
   }
 
   static std::function<void(kinematic_state&)> on_kinematic_update;

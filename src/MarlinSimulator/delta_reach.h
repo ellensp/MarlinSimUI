@@ -59,5 +59,5 @@ public:
 private:
   std::vector<float> signature;
   glm::vec4 no_tint {};           // Uniforms are per program: set neutral values for this mesh
-  float no_glow = 0;
+  float no_glow = 0, no_dim = 1;
 };

@@ -10,6 +10,7 @@ SerialLog serial_log;
 
 void SerialLog::push(uint8_t stream, std::string&& text) {
   // Caller holds the mutex.
+  if (observer) observer(stream, text);
   if (line_limit == 0) return;
 
   while (lines.size() >= line_limit) {

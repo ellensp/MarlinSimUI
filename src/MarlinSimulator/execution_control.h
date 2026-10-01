@@ -78,9 +78,21 @@ public:
 
     inline static void realtime_sync() {
       updateRealtime();
-      if (getRealtimeTicks() > getTicks() || realtime_scale > 99.0f) {
+      if (realtime_scale > 99.0f) {
         realtime_nanos = SimulationRuntime::nanos();
-      } else while (getTicks() > getRealtimeTicks()) {
+      }
+      else if (getRealtimeTicks() > getTicks()) {
+        // Behind: run flat out to catch up, but only by a bounded amount. Short
+        // overshoots must be recovered -- a sleep lasts ~10us on macOS even when
+        // asked for 1ns, and a software-SPI LCD redraw waits thousands of times,
+        // so discarding every overshoot made the sim lose ~1/3 of real time in
+        // bursts (visible as stuttering motion). A long stall (a debugger break,
+        // an overloaded host) is still dropped, so the sim never races to catch up.
+        constexpr uint64_t max_catch_up_nanos = 50 * ONE_MILLION;
+        const uint64_t sim_nanos = SimulationRuntime::nanos();
+        if (realtime_nanos > sim_nanos + max_catch_up_nanos) realtime_nanos = sim_nanos + max_catch_up_nanos;
+      }
+      else while (getTicks() > getRealtimeTicks()) {
         if (quit_requested) throw (std::runtime_error("Quit Requested"));  // Quit program when stuck at 0 speed
         updateRealtime();
         realtime_scale > 20.0f ?  std::this_thread::yield() : std::this_thread::sleep_for(std::chrono::nanoseconds(1));

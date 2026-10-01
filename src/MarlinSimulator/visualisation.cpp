@@ -20,6 +20,7 @@
 #include <src/module/temperature.h> // Heater targets, which set the full-pink point
 
 #include "hardware/Heater.h"
+#include "thermal_fault_blink.h"
 #if ENABLED(BLTOUCH)
   #include "hardware/print_bed.h"
   #include "hardware/bed_probe.h"
@@ -155,6 +156,7 @@ void Visualisation::create() {
     auto mesh_object = renderer::get_mesh_by_id(m);
     mesh_object->set_shader_program(default_program);
     mesh_object->m_shader_instance->set_uniform("u_tint", &no_tint); // Uniforms are per program; don't inherit the bed tint
+    mesh_object->m_shader_instance->set_uniform("u_dim", &no_dim);   // ...or the bed's fault blink
     mesh_object->m_scale = effector_scale;
   }
 
@@ -176,6 +178,7 @@ void Visualisation::create() {
   auto mesh_object = renderer::get_mesh_by_id(m_bed_mesh);
   mesh_object->set_shader_program(default_program);
   mesh_object->m_shader_instance->set_uniform("u_tint", &bed_tint);
+  mesh_object->m_shader_instance->set_uniform("u_dim", &bed_dim);
   auto bed_mesh_buffer = renderer::Buffer<renderer::vertex_data_t>::create();
   mesh_object->buffer_vector<renderer::vertex_data_t>().push_back(bed_mesh_buffer);
   bed_mesh_buffer->data().reserve((BED_NUM_VERTEXES_PER_AXIS * BED_NUM_VERTEXES_PER_AXIS * 6));
@@ -521,9 +524,10 @@ void Visualisation::update_heat_tint(const bool gradient_enabled) {
       #endif
       tint = heat_tint(hotend_heaters[h]->hotend_temperature, target, 200, hotend_ramp);
     }
-    machine.set_hotend_look(h, tint, count > 1 && h == active ? 0.6f : 0.0f);
+    machine.set_hotend_look(h, tint, count > 1 && h == active ? 0.6f : 0.0f, thermal_fault_blink::dim(h));
   }
 
+  bed_dim = thermal_fault_blink::dim(thermal_fault_blink::bed);
   bed_tint = {};
   #if HAS_HEATED_BED
     if (bed_heater && !gradient_enabled)

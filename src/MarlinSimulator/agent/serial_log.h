@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -65,7 +66,15 @@ public:
   uint64_t oldest_sequence() const;
   uint64_t dropped_lines() const;
 
+  // Called with every completed line, even when retention is 0, on the simulation
+  // thread with the log's mutex held: it must be quick and must not call back into
+  // the log. For in-sim watchers (e.g. the thermal fault blink). Set once at startup.
+  using Observer = std::function<void(uint8_t stream, const std::string& text)>;
+  void set_observer(Observer fn) { std::scoped_lock lock(mutex); observer = std::move(fn); }
+
 private:
+  Observer observer;
+
   void push(uint8_t stream, std::string&& text);
 
   mutable std::mutex mutex;

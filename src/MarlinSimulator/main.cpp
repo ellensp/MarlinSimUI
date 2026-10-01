@@ -11,7 +11,9 @@
 #include "RawSocketSerial.h"
 #include "audio.h"
 #include "agent/agent_interface.h"
+#include "agent/serial_log.h"
 #include "machine_model.h"
+#include "thermal_fault_blink.h"
 
 RawSocketSerial net_serial{};
 
@@ -157,6 +159,10 @@ int main(int argc, char** argv) {
   // Listen before starting simulator loop to avoid
   // thread synchronization issues if listen_on_port fails
   net_serial.listen_on_port(options.serial_port);
+
+  // Watch Marlin's output for thermal faults, to blink the offending heater.
+  // Set before the simulation starts, whether or not the agent interface is on.
+  agent::serial_log.set_observer([](uint8_t, const std::string& line) { thermal_fault_blink::observe(line); });
 
   if (options.agent_port) {
     agent::register_routes();

@@ -37,6 +37,17 @@ public:
     }
   }
 
+  // {"triggered": bool} forces the switch (manual override); {"auto": true} returns it to
+  // the geometric state; {"enabled": false} disconnects it (never triggers)
+  bool apply(const agent::JsonValue& body, std::string& error) override {
+    bool applied = false, flag;
+    if (body.get_bool("triggered", flag)) { manual_override = true; manual_trigger_state = flag; applied = true; }
+    if (body.get_bool("auto", flag)) { manual_override = !flag; applied = true; }
+    if (body.get_bool("enabled", flag)) { enabled = flag; applied = true; }
+    if (!applied) error = "no recognised field (triggered, auto, enabled)";
+    return applied;
+  }
+
   void serialize(agent::JsonWriter& writer) const override {
     // Report both the logical trigger state and how it was produced, so an
     // agent can tell a genuine geometric trigger from a manual override.

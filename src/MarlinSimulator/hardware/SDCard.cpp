@@ -1,5 +1,6 @@
 
 #include "SDCard.h"
+#include "../agent/json.h"
 #include <src/sd/SdInfo.h>
 #include <src/sd/SdFatConfig.h>
 #include <imgui_internal.h>
@@ -306,6 +307,49 @@ void SDCard::generate_empty_image(std::string filename) {
     fwrite(zeros, sizeof(zeros), 1, fp);
   }
   fclose(fp);
+}
+
+bool SDCard::use_image(const std::string& filename, const bool persist) {
+  image_filename = filename;
+  if (persist) set_saved_image_filename(filename);
+  refresh_img_audit();
+  // Close the old image now. Marlin reopens via CMD0 when it next mounts.
+  if (fp) { fclose(fp); fp = nullptr; }
+  return set_present(true);
+}
+
+bool SDCard::set_present(const bool present) {
+  if (present) refresh_img_audit();
+  sd_present = present && img_audit_status == ImgAuditStatus::Passed;
+  Gpio::set_pin_value(sd_detect, sd_present ? sd_detect_state : !sd_detect_state);
+  return sd_present == present;
+}
+
+void SDCard::serialize(agent::JsonWriter& writer) const {
+  const char* audit = img_audit_status == ImgAuditStatus::Passed ? "Passed"
+                    : img_audit_status == ImgAuditStatus::Missing ? "Missing" : "Corrupted";
+  writer.begin_object();
+  writer.member("present", sd_present);
+  writer.member("image", image_filename);
+  writer.member("image_audit", audit);
+  writer.member("detect_pin", int64_t(sd_detect));
+  writer.end_object();
+}
+
+bool SDCard::apply(const agent::JsonValue& body, std::string& error) {
+  bool applied = false;
+  std::string image;
+  if (body.get_string("image", image)) {
+    if (!use_image(image)) { error = "image '" + image + "' failed the FAT audit"; return false; }
+    applied = true;
+  }
+  bool present;
+  if (body.get_bool("present", present)) {
+    if (!set_present(present)) { error = "can't insert: the image failed the FAT audit"; return false; }
+    applied = true;
+  }
+  if (!applied) error = "no recognised field (present, image)";
+  return applied;
 }
 
 void SDCard::onByteReceived(uint8_t _byte) {

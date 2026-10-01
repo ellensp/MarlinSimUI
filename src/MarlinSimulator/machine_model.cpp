@@ -401,6 +401,7 @@ renderer::mesh_id_t MachineModel::add_part(Geometry geometry, Animate animate, c
   mesh->m_shader_instance->set_uniform("u_model", &mesh->m_transform);
   mesh->m_shader_instance->set_uniform("u_tint", &no_tint);
   mesh->m_shader_instance->set_uniform("u_glow", &no_glow);
+  mesh->m_shader_instance->set_uniform("u_dim", &no_dim);
   mesh->m_visible = visible;
   if (in_bounds)
     for (auto& v : buffer->cdata()) {
@@ -428,6 +429,7 @@ void MachineModel::add_hot_parts() {
     auto mesh = renderer::get_mesh_by_id(id);
     mesh->m_shader_instance->set_uniform("u_tint", &hotend_tint[h]);
     mesh->m_shader_instance->set_uniform("u_glow", &hotend_glow[h]);
+    mesh->m_shader_instance->set_uniform("u_dim", &hotend_dim[h]);
   }
 }
 
@@ -453,10 +455,11 @@ void MachineModel::add_probe(std::function<glm::vec2(glm::vec2)> nearest, const 
   }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world + glm::vec3(0, p.probe_raise, 0)); }, false);
 }
 
-void MachineModel::set_hotend_look(const int h, const glm::vec4 tint, const float glow) {
+void MachineModel::set_hotend_look(const int h, const glm::vec4 tint, const float glow, const float dim) {
   if (h < 0 || h >= max_hotends) return;
   hotend_tint[h] = tint;
   hotend_glow[h] = glow;
+  hotend_dim[h] = dim;
 }
 
 void MachineModel::build(const MachineType new_type, std::shared_ptr<renderer::ShaderProgram> shader) {

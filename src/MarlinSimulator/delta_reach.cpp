@@ -111,6 +111,7 @@ void ReachVolume::create(std::shared_ptr<renderer::ShaderProgram> lit_program) {
   m->m_shader_instance->set_uniform("u_model", &m->m_transform);
   m->m_shader_instance->set_uniform("u_tint", &no_tint);
   m->m_shader_instance->set_uniform("u_glow", &no_glow);
+  m->m_shader_instance->set_uniform("u_dim", &no_dim);
   m->buffer_vector<vertex_data_t>().push_back(VertexBuffer::create());
   m->m_translucent = true;
   m->m_visible = visible;

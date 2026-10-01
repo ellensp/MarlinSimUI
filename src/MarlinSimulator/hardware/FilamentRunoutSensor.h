@@ -3,6 +3,7 @@
 #include "Gpio.h"
 #include "../user_interface.h"
 #include "../virtual_printer.h"
+#include "../agent/json.h"
 
 class FilamentRunoutSensor : public VirtualPrinter::Component {
 public:
@@ -20,6 +21,26 @@ public:
     bool value_check = filament_present.load();
     ImGui::Checkbox("Filament Present ", &value_check);
     filament_present.store(value_check);
+  }
+
+  void serialize(agent::JsonWriter& writer) const override {
+    const bool present = filament_present.load();
+    writer.begin_object();
+    writer.member("filament_present", present);
+    writer.member("pin", int64_t(runout_pin));
+    writer.member("pin_level", present ? !runtout_trigger_value : runtout_trigger_value);
+    writer.end_object();
+  }
+
+  // {"filament_present": false} runs the filament out; true loads it again.
+  bool apply(const agent::JsonValue& body, std::string& error) override {
+    bool present;
+    if (!body.get_bool("filament_present", present)) {
+      error = "'filament_present' (bool) is required";
+      return false;
+    }
+    filament_present = present;
+    return true;
   }
 
 private:

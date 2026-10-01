@@ -8,15 +8,26 @@
 #include "../view_control.h"
 #include "../machine_model.h"
 
+#include "host_print.h"
+#include "../thermal_fault_blink.h"
+#include "../hardware/fat_image.h"
+#include "../hardware/SDCard.h"
+
 #include "serial.h"
 #include <src/gcode/queue.h>
+#include <src/MarlinCore.h>   // marlin.isRunning(): the serial host waits for a ready machine
 #include <src/module/planner.h>
+#if HAS_MEDIA
+  #include <src/sd/cardreader.h>
+#endif
 
-extern MSerialT serial_stream_3;
+extern MSerialT serial_stream_0, serial_stream_1, serial_stream_2, serial_stream_3;
 
 #include <cstring>
 #include <strings.h>
+#include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <future>
 
 
@@ -137,6 +148,10 @@ void handle_get_state(const Request&, Response& response) {
 
   writer.key("components");
   VirtualPrinter::serialize_all(writer);
+
+  // Heaters blinking for a thermal fault (until reset, or the blink times out)
+  writer.key("thermal_faults");
+  thermal_fault_blink::serialize(writer);
 
   writer.end_object();
   response.json(writer.str());
@@ -612,6 +627,340 @@ void handle_get_ping(const Request&, Response& response) {
   response.json(writer.str());
 }
 
+
+//
+// Fault injection and sensor simulation by component name
+//
+
+// POST /component/<name> -- set a component's simulated state, by name, with the
+// same keys GET /state/<name> reports. No pin or ADC numbers needed:
+//   Filament Runout Sensor 1   {"filament_present": false}
+//   Hotend0 Heater             {"sensor_mode": "ForceMax"} | {"sensor_temperature": 300}
+//                              {"element_ok": false} | {"temperature": 60}
+//   SD Card                    {"present": false} | {"image": "/abs/card.img"}
+//   Endstop(X Min)             {"triggered": true} | {"auto": true} | {"enabled": false}
+// Answers with the component's state after the change.
+void handle_post_component(const Request& request, Response& response) {
+  constexpr const char* prefix = "/component/";
+  const size_t prefix_length = strlen(prefix);
+  if (request.path.size() <= prefix_length) {
+    response.error(400, "missing component name");
+    return;
+  }
+  const std::string name = AgentServer::percent_decode(request.path.substr(prefix_length));
+  auto component = VirtualPrinter::find_component(name);
+  if (!component) {
+    response.error(404, "no component named '" + name + "' (see GET /components)");
+    return;
+  }
+
+  JsonValue body;
+  if (!body.parse(request.body)) {
+    response.error(400, "body must be a flat JSON object");
+    return;
+  }
+
+  std::string error;
+  if (!component->apply(body, error)) {
+    response.error(400, error);
+    return;
+  }
+
+  JsonWriter writer;
+  VirtualPrinter::serialize_one(name, writer);
+  response.json(writer.str());
+}
+
+//
+// Printing: from SD (/print) and from a simulated serial host (/print with "via":"serial")
+//
+
+// The SD card component, if the config has one
+std::shared_ptr<SDCard> sd_card() {
+  auto sd = VirtualPrinter::find_component("SD Card");
+  return sd ? std::static_pointer_cast<SDCard>(sd) : nullptr;
+}
+
+// Fresh scratch image path for each build. The SD slot may still be reading the
+// previous agent image, so never overwrite one in place. See insert_prepared_card().
+std::string new_scratch_image_path() {
+  namespace fs = std::filesystem;
+  static std::atomic_uint32_t counter { 0 };
+  std::error_code ec;
+  fs::path dir = fs::temp_directory_path(ec);
+  if (ec) dir = ".";
+  return (dir / ("marlinsim_agent_sd_" + std::to_string(counter++) + ".img")).u8string();
+}
+
+// A card image built by a preparer on the server thread, for the handler to insert
+struct PreparedCard {
+  std::vector<fat_image::Entry> entries;
+  std::string image;
+  ~PreparedCard() { if (!image.empty() && !inserted) { std::error_code ec; std::filesystem::remove(std::filesystem::u8path(image), ec); } }
+  bool inserted = false;
+};
+
+// SERVER THREAD: pack a host file or folder into a new FAT image. Touches only the
+// host filesystem, so the simulated machine keeps running while a big file is copied.
+bool build_card(const std::string& path, PreparedCard& card_out, std::string& error) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const auto p = fs::u8path(path);
+  if (fs::is_directory(p, ec)) {
+    card_out.entries = fat_image::entries_in_folder(path);
+    if (card_out.entries.empty()) { error = "no files in '" + path + "'"; return false; }
+  }
+  else if (fs::is_regular_file(p, ec))
+    card_out.entries = { { path, p.filename().u8string(), "" } };
+  else {
+    error = "'" + path + "' is not a file or folder";
+    return false;
+  }
+  card_out.image = new_scratch_image_path();
+  if (!fat_image::build(card_out.image, card_out.entries, error)) return false;
+  return true;
+}
+
+// SIMULATION THREAD: put a prepared image in the SD slot. Marlin still has to mount it (M21).
+bool insert_prepared_card(PreparedCard& prepared, std::string& error) {
+  static std::string last_image;  // The previous agent image, deleted once replaced
+  auto sd = sd_card();
+  if (!sd) { error = "no SD card in this configuration (enable SDSUPPORT)"; return false; }
+  if (!sd->use_image(prepared.image)) { error = "the built image failed the FAT audit"; return false; }
+  prepared.inserted = true;
+  if (!last_image.empty() && last_image != prepared.image) {
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::u8path(last_image), ec);
+  }
+  last_image = prepared.image;
+  return true;
+}
+
+// SERVER THREAD preparer for POST /sd/mount and POST /print (via sd, with a path):
+// build the image now. Errors in the body are left for the handler to report.
+bool prepare_card(Request& request, Response& response) {
+  JsonValue body;
+  if (!body.parse(request.body)) return true;
+  std::string via = "sd", path, file;
+  body.get_string("via", via);
+  body.get_string("path", path);
+  body.get_string("file", file);
+  if (via != "sd" || path.empty() || !file.empty()) return true;
+  #if HAS_MEDIA
+    auto prepared = std::make_shared<PreparedCard>();
+    std::string error;
+    if (!build_card(path, *prepared, error)) { response.error(400, error); return false; }
+    request.prepared = prepared;
+  #else
+    UNUSED(response);
+  #endif
+  return true;
+}
+
+// SERVER THREAD preparer for POST /print via serial: read and clean the file now
+bool prepare_host_file(Request& request, Response& response) {
+  JsonValue body;
+  if (!body.parse(request.body)) return true;
+  std::string via, path;
+  body.get_string("via", via);
+  body.get_string("path", path);
+  if (via != "serial" || path.empty()) return true;
+  auto lines = std::make_shared<std::vector<std::string>>();
+  std::string error;
+  if (!HostPrint::load(path, *lines, error)) { response.error(400, error); return false; }
+  request.prepared = lines;
+  return true;
+}
+
+// Queue a line of G-code as if typed on the agent's serial port
+void enqueue_gcode(const std::string& line) {
+  const std::string command = line + "\n";
+  serial_stream_3.receive_buffer.write((uint8_t*)command.data(), command.size());
+}
+
+// POST /sd/mount -- put host files on the simulated SD card, no image prep needed.
+//   {"path": "/abs/file.gcode"}   one file
+//   {"path": "/abs/folder"}       every file in the folder (flat)
+//   {"path": ..., "mount": false} build + insert only; don't send M21
+// Builds a FAT16 image in the temp dir (on the server thread, so the machine
+// keeps running), swaps it into the SD slot, and sends
+// M21 so Marlin mounts it. Answers with the 8.3 and long name of each file.
+void handle_post_sd_mount(const Request& request, Response& response) {
+  JsonValue body;
+  if (!body.parse(request.body)) { response.error(400, "body is not valid JSON"); return; }
+  std::string path;
+  if (!body.get_string("path", path) || path.empty()) {
+    response.error(400, "'path' (a G-code file or a folder) is required");
+    return;
+  }
+  bool mount = true;
+  body.get_bool("mount", mount);
+
+  #if HAS_MEDIA
+    if (card.isFileOpen()) { response.error(409, "an SD print is in progress; stop it first (M524)"); return; }
+  #endif
+
+  auto prepared = std::static_pointer_cast<PreparedCard>(request.prepared);
+  std::string error;
+  if (!prepared) { response.error(400, "no SD card in this configuration (enable SDSUPPORT)"); return; }
+  if (!insert_prepared_card(*prepared, error)) { response.error(400, error); return; }
+
+  const uint64_t serial_from = serial_log.next_sequence();
+  if (mount) enqueue_gcode("M21");
+
+  JsonWriter writer;
+  writer.begin_object();
+  writer.member("ok", true);
+  writer.member("image", prepared->image);
+  writer.key("files");
+  writer.begin_array();
+  for (auto const& e : prepared->entries) {
+    writer.begin_object();
+    writer.member("name", e.long_name);
+    writer.member("dos_name", e.short_name);
+    writer.end_object();
+  }
+  writer.end_array();
+  writer.member("serial_from", double(serial_from));
+  writer.end_object();
+  response.json(writer.str());
+}
+
+// POST /print -- start a print, from the SD card or from a simulated serial host.
+//
+// SD (the default):
+//   {"path": "/abs/file.gcode"}   put the file on a fresh card image, mount, M23 + M24
+//   {"file": "BENCHY.GCO"}        print a file already on the mounted card (8.3 name)
+// Serial host:
+//   {"path": "/abs/file.gcode", "via": "serial"[, "port": 0]}
+//       Stream it like a host would: M110 N0, then N<n> lines with checksums, one
+//       per "ok", honoring Resend and //action:pause|resume|cancel. Port defaults
+//       to 0 (SERIAL_PORT). Progress: GET /print.
+void handle_post_print(const Request& request, Response& response) {
+  JsonValue body;
+  if (!body.parse(request.body)) { response.error(400, "body is not valid JSON"); return; }
+
+  std::string via = "sd", path, file;
+  body.get_string("via", via);
+  body.get_string("path", path);
+  body.get_string("file", file);
+  const uint64_t serial_from = serial_log.next_sequence();
+
+  JsonWriter writer;
+  writer.begin_object();
+  writer.member("ok", true);
+  writer.member("via", via);
+
+  if (via == "serial") {
+    if (path.empty()) { response.error(400, "'path' (a G-code file on this computer) is required"); return; }
+    double port = 0;
+    body.get_double("port", port);
+    auto lines = std::static_pointer_cast<std::vector<std::string>>(request.prepared);
+    if (!lines) { response.error(400, "'" + path + "' could not be read"); return; }
+    std::string error;
+    if (!host_print.start(path, std::move(*lines), int(port), error)) { response.error(409, error); return; }
+    writer.member("file", path);
+    writer.member("port", int(port));
+  }
+  else if (via == "sd") {
+    #if HAS_MEDIA
+      if (card.isFileOpen()) { response.error(409, "an SD print is in progress; stop it first (M524)"); return; }
+      if (file.empty()) {
+        if (path.empty()) { response.error(400, "'path' (a host G-code file) or 'file' (a name on the card) is required"); return; }
+        auto prepared = std::static_pointer_cast<PreparedCard>(request.prepared);
+        if (!prepared) { response.error(400, "'" + path + "' could not be put on a card"); return; }
+        if (prepared->entries.size() != 1) { response.error(400, "'path' must be a single file to print"); return; }
+        std::string error;
+        if (!insert_prepared_card(*prepared, error)) { response.error(400, error); return; }
+        file = prepared->entries[0].short_name;
+        writer.member("image", prepared->image);
+        enqueue_gcode("M21");
+      }
+      // Marlin queues these in order: M21 mounts before M23 selects
+      enqueue_gcode("M23 " + file);
+      enqueue_gcode("M24");
+      writer.member("file", file);
+    #else
+      response.error(400, "no SD support in this configuration; use \"via\":\"serial\"");
+      return;
+    #endif
+  }
+  else {
+    response.error(400, "'via' must be \"sd\" or \"serial\"");
+    return;
+  }
+
+  writer.member("serial_from", double(serial_from));
+  writer.member("hint", std::string("poll GET /print for progress; GET /serial?since=serial_from for Marlin's replies"));
+  writer.end_object();
+  response.json(writer.str());
+}
+
+// GET /print -- progress of the SD print (from Marlin) and the serial host print.
+void handle_get_print(const Request&, Response& response) {
+  JsonWriter writer;
+  writer.begin_object();
+
+  writer.key("sd");
+  writer.begin_object();
+  #if HAS_MEDIA
+    writer.member("mounted", card.isMounted());
+    writer.member("file_open", card.isFileOpen());
+    writer.member("printing", card.isPrinting());
+    writer.member("paused", card.isPaused());
+    writer.member("filename", std::string(card.isFileOpen() ? card.longest_filename() : ""));
+    writer.member("percent", card.isFileOpen() ? double(card.percentDone()) : 0.0);
+  #else
+    writer.member("supported", false);
+  #endif
+  writer.end_object();
+
+  writer.key("serial");
+  host_print.serialize(writer);
+
+  writer.end_object();
+  response.json(writer.str());
+}
+
+// POST /print/control -- {"action": "pause" | "resume" | "abort"}
+// Acts on the serial host print if one is running, otherwise on the SD print
+// (M25 / M24 / M524).
+void handle_post_print_control(const Request& request, Response& response) {
+  JsonValue body;
+  if (!body.parse(request.body)) { response.error(400, "body is not valid JSON"); return; }
+  std::string action;
+  if (!body.get_string("action", action)) { response.error(400, "'action' (pause, resume, abort) is required"); return; }
+
+  std::string target;
+  if (host_print.active()) {
+    target = "serial";
+    if (action == "pause") host_print.pause();
+    else if (action == "resume") host_print.resume();
+    else if (action == "abort") host_print.abort();
+    else { response.error(400, "'action' must be pause, resume or abort"); return; }
+  }
+  else {
+    #if HAS_MEDIA
+      target = "sd";
+      if (action == "pause") enqueue_gcode("M25");
+      else if (action == "resume") enqueue_gcode("M24");
+      else if (action == "abort") enqueue_gcode("M524");
+      else { response.error(400, "'action' must be pause, resume or abort"); return; }
+    #else
+      response.error(409, "nothing is printing");
+      return;
+    #endif
+  }
+
+  JsonWriter writer;
+  writer.begin_object();
+  writer.member("ok", true);
+  writer.member("target", target);
+  writer.member("action", action);
+  writer.end_object();
+  response.json(writer.str());
+}
+
 } // namespace
 
 void register_routes() {
@@ -650,6 +999,28 @@ void register_routes() {
 
   // Prefix route: any GET /state/<name>.
   server.route_prefix("GET /state/", handle_get_state_component);
+
+  // Fault injection / sensor simulation by component name
+  server.route_prefix("POST /component/", handle_post_component);
+
+  // Printing from SD and from the built-in serial host
+  // File I/O and image building run in preparers on the server thread, so the
+  // simulated machine doesn't stall while a large G-code file is copied
+  server.route("POST /sd/mount", handle_post_sd_mount);
+  server.prepare("POST /sd/mount", prepare_card);
+  server.route("POST /print", handle_post_print);
+  server.prepare("POST /print", [](Request& request, Response& response) {
+    return prepare_card(request, response) && prepare_host_file(request, response);
+  });
+  server.route("GET /print", handle_get_print);
+  server.route("POST /print/control", handle_post_print_control);
+
+  // The serial host writes into Marlin's receive buffer for its port
+  host_print.set_sender([](int port, const std::string& line) {
+    MSerialT* streams[] = { &serial_stream_0, &serial_stream_1, &serial_stream_2, &serial_stream_3 };
+    streams[port]->receive_buffer.write((uint8_t*)line.data(), line.size());
+  });
+  host_print.set_ready([] { return marlin.isRunning() && !queue.has_commands_queued(); });
 }
 
 } // namespace agent

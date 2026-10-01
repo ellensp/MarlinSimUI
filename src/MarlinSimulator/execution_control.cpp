@@ -8,6 +8,7 @@
 #include "RawSocketSerial.h"
 #include "agent/agent_interface.h"
 #include "agent/serial_log.h"
+#include "agent/host_print.h"
 
 extern RawSocketSerial net_serial;
 extern MSerialT serial_stream_0;
@@ -108,8 +109,10 @@ bool Kernel::execute_loop(uint64_t max_end_ticks) {
   // when no hardware ISR is active — the Marlin Loop timer (lowest priority)
   // is fine, and allowing it means agent polling still works while Marlin is
   // blocked in a long move or a synchronize() spin.
-  if (isr_stack.empty() || isr_stack.back()->priority >= marlin_loop_isr_priority)
+  if (isr_stack.empty() || isr_stack.back()->priority >= marlin_loop_isr_priority) {
     agent::server.service();
+    agent::host_print.pump();  // Agent's serial host: send the next line when Marlin says "ok"
+  }
 
   uint64_t current_ticks = TimeControl::getTicks();
   uint64_t current_priority = std::numeric_limits<uint64_t>::max();

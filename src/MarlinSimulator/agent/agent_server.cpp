@@ -127,11 +127,16 @@ bool Request::query_param(const std::string& name, std::string& out) const {
 }
 
 void AgentServer::route(const std::string& key, Handler handler, Affinity affinity, uint32_t timeout_ms) {
-  handlers[key] = Route{ std::move(handler), affinity, timeout_ms };
+  handlers[key] = Route{ std::move(handler), affinity, nullptr, timeout_ms };
 }
 
 void AgentServer::route_prefix(const std::string& key, Handler handler, Affinity affinity) {
   prefix_handlers[key] = Route{ std::move(handler), affinity };
+}
+
+void AgentServer::prepare(const std::string& key, Preparer preparer) {
+  auto it = handlers.find(key);
+  if (it != handlers.end()) it->second.preparer = std::move(preparer);
 }
 
 std::string AgentServer::percent_decode(const std::string& text) {
@@ -333,6 +338,9 @@ void AgentServer::execute() {
         // at realtime_scale == 0 the simulation thread never reaches
         // service(), so a queued unfreeze request could never be serviced.
         route->handler(request, response);
+      }
+      else if (route->preparer && !route->preparer(request, response)) {
+        // The preparer answered (e.g. a bad path) without queueing
       }
       else {
         // Hand off to the simulation thread and wait. Shared ownership means a

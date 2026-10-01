@@ -229,6 +229,7 @@ void BedMarkings::create(std::shared_ptr<renderer::ShaderProgram> program) {
   auto m = renderer::get_mesh_by_id(mesh);
   m->set_shader_program(program);
   m->m_shader_instance->set_uniform("u_tint", &no_tint); // Uniforms are per program; don't inherit the bed tint
+  m->m_shader_instance->set_uniform("u_dim", &no_dim);   // ...or the bed's fault blink
   m->buffer_vector<vertex_data_t>().push_back(VertexBuffer::create());
   m->m_visible = visible;
   signature.clear();

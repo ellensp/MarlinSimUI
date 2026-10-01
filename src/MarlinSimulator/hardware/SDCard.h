@@ -111,6 +111,21 @@ public:
   void onByteReceived(uint8_t _byte) override;
   void onRequestedDataReceived(uint8_t token, uint8_t* _data, size_t count) override;
 
+  /**
+   * Put a different image in the slot, as if the card were swapped. Marlin
+   * reopens the image on its next mount (CMD0), so follow this with M21.
+   * persist=false leaves the image a human picked in the UI remembered for
+   * next launch. Returns false if the image fails the FAT audit.
+   */
+  bool use_image(const std::string& filename, const bool persist=false);
+
+  // Insert or eject the card (the SD_DETECT switch). Inserting needs a valid image.
+  bool set_present(const bool present);
+
+  void serialize(agent::JsonWriter& writer) const override;
+  // {"present": bool} ejects/inserts; {"image": "/abs/path.img"} swaps the image
+  bool apply(const agent::JsonValue& body, std::string& error) override;
+
   void interrupt(GpioEvent &ev) {
     if (ev.pin_id == sd_detect && ev.event == GpioEvent::GET_VALUE) {
       Gpio::set_pin_value(sd_detect, sd_present ? sd_detect_state : !sd_detect_state);

@@ -81,7 +81,8 @@ public:
 
   // Per-frame look of hotend h's heater block and nozzle, applied by the lit shader:
   // tint.rgb blended in by tint.a, plus a 'glow' brightness for the active hotend.
-  void set_hotend_look(const int h, const glm::vec4 tint, const float glow);
+  // dim: 1 normal, 0.5 half as bright (the dark phase of a thermal fault blink)
+  void set_hotend_look(const int h, const glm::vec4 tint, const float glow, const float dim=1);
 
   // World-space bounds of the machine at rest, for camera framing
   glm::vec3 bounds_min {}, bounds_max {};
@@ -121,11 +122,12 @@ private:
   std::shared_ptr<renderer::ShaderProgram> program;
 
   // Shader uniforms hold pointers, so these must outlive the meshes. Every part sets
-  // u_tint and u_glow: uniforms are per program, so an unset one keeps the last mesh's value.
+  // u_tint, u_glow and u_dim: uniforms are per program, so an unset one keeps the last mesh's value.
   glm::vec4 no_tint {};
-  float no_glow = 0;
+  float no_glow = 0, no_dim = 1;
   glm::vec4 hotend_tint[max_hotends] {};
   float hotend_glow[max_hotends] {};
+  float hotend_dim[max_hotends] { 1, 1, 1, 1, 1, 1, 1, 1 };
   glm::vec3 hotend_layout[max_hotends] {};  // hotend_offset(h) when the parts were built
   glm::vec3 probe_layout {};                // live_probe_offset() when the parts were built
 };

@@ -46,6 +46,10 @@ struct Request {
   std::string query;  // raw query string, may be empty
   std::string body;
 
+  // Set by the route's Preparer (server thread), read by its Handler (simulation
+  // thread): slow work done ahead of the queue, e.g. an SD image or a loaded file.
+  std::shared_ptr<void> prepared;
+
   // Look up a query-string parameter. Returns false if absent.
   bool query_param(const std::string& name, std::string& out) const;
 };
@@ -61,6 +65,13 @@ struct Response {
 
 // Handlers run ON THE SIMULATION THREAD. Reading Marlin state here is safe.
 using Handler = std::function<void(const Request&, Response&)>;
+
+// A Preparer runs ON THE SERVER THREAD before a Simulation request is queued, so
+// slow host-side work (file I/O, building images) doesn't stall the simulated
+// machine. It must not touch Marlin or component state. It may stash a result in
+// request.prepared. Return false to answer now with 'response' (e.g. an error)
+// without queueing.
+using Preparer = std::function<bool(Request&, Response&)>;
 
 // Where a route's handler is executed.
 enum class Affinity {
@@ -93,6 +104,9 @@ public:
   // Exact routes always win; prefix routes are tried longest-first.
   void route_prefix(const std::string& key, Handler handler, Affinity affinity = Affinity::Simulation);
 
+  // Give an exact Simulation route a Preparer (see above). Register the route first.
+  void prepare(const std::string& key, Preparer preparer);
+
   // Rewrite each request (e.g. canonicalize a path) before its route is looked
   // up. Runs on the server thread, so it must only touch the request.
   void set_rewriter(std::function<void(Request&)> fn) { rewriter = std::move(fn); }
@@ -114,6 +128,7 @@ private:
   struct Route {
     Handler handler;
     Affinity affinity = Affinity::Simulation;
+    Preparer preparer;  // Optional; server thread, before queueing
     // Per-route service budget in ms. 0 uses the default. Routes that block on
     // purpose (POST /gcode with wait) need more than the default, but raising
     // the default globally would mask a genuinely frozen simulation.
