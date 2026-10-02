@@ -76,6 +76,7 @@ Simulation-thread requests time out with 503 after 5 s of wall-clock time.
 | `GET /displays` | sim | Components that can be captured. |
 | `POST /screenshot` | sim | `{"path":"/abs/file.png"[, "display":"<name>"]}`. Writes a PNG. |
 | `POST /touch` | sim | `{"x":0..1, "y":0..1[, "hold_ms":N]}`. Taps or holds the touchscreen. |
+| `POST /touch/rects` | sim | `{"show":bool}` or `{}` to toggle. Overlays Marlin's touch control rects on the TFT. |
 | `POST /capture/<panel>` | varies | Capture a visual panel to PNG by short name, case-insensitive (see 2.7). |
 | `GET /view` | direct | Current Viewport camera and printer model (see 2.6). |
 | `POST /view` | direct | Set the Viewport camera and/or printer model. Applied on the next UI frame. |
@@ -134,6 +135,17 @@ Marlin is currently applying (`cal_x`, `cal_y`, `offset_x`, `offset_y`,
 `orientation`). A calibration of all zeros means every touch maps to (0,0) and
 normal controls cannot fire.
 
+`POST /touch/rects` shows (`{"show": true}`), hides (`{"show": false}`) or
+toggles (`{}`) an overlay of Marlin's touch control rectangles on the SPI TFT:
+a 2px white outline with a 10% white interior. The response gives the current
+`count`. Marlin's simulator build sends the rectangles to the panel with the
+custom command `0xF5` as the last stage of drawing each screen, so the overlay
+always matches the controls Marlin will hit-test. It is composited over the
+panel image (window and screenshots) without changing the panel's memory, so
+it can be toggled at any time. The display's "Touch Rects" checkbox and
+`POST /component/ST7796Device Display {"touch_rects": true}` do the same.
+Use it to check that touch zones line up with what is drawn.
+
 ### 2.5 Component state
 
 Components opt in by overriding `Component::serialize()`. Implemented:
@@ -144,6 +156,7 @@ Components opt in by overriding `Component::serialize()`. Implemented:
 | `Heater` | Temperature, ambient, energy, sensor mode (`Normal`/`ForceMin`/`ForceMax`/`ForcePause`), PWM duty/period, volts, resistance, pins. |
 | `EndStop` | Effective trigger, geometric trigger, manual override, pin level, pin. |
 | `Touch` (XPT2046) | Raw x/y, dirty, held, polls, injected touches, calibration. |
+| `ST7796Device Display` | Width, height, `touch_rects` (overlay shown), `touch_rect_count`. Settable: `touch_rects`. |
 
 Others report `{}`. Prefer reporting simulated ground truth over Marlin's
 belief — the difference between the two is usually the bug.

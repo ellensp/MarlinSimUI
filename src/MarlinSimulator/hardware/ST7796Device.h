@@ -5,6 +5,8 @@
 
 #include <list>
 #include <deque>
+#include <mutex>
+#include <atomic>
 #include "Gpio.h"
 #include "bus/spi.h"
 
@@ -42,10 +44,13 @@ public:
   bool capture(std::vector<uint8_t>& rgb, uint32_t& out_width, uint32_t& out_height) const override {
     // graphic_ram is RGB565; expand to 8 bits per channel with bit
     // replication so full-scale values map to 255 rather than 248/252.
+    // The touch rects overlay is included, as it appears on screen.
+    std::vector<uint16_t> ram;
+    const uint16_t * const src = composed(ram);
     out_width = width; out_height = height;
     rgb.resize(size_t(width) * size_t(height) * 3);
     for (size_t i = 0; i < size_t(width) * size_t(height); ++i) {
-      const uint16_t pixel = graphic_ram[i];
+      const uint16_t pixel = src[i];
       const uint8_t r5 = uint8_t((pixel >> 11) & 0x1F);
       const uint8_t g6 = uint8_t((pixel >> 5)  & 0x3F);
       const uint8_t b5 = uint8_t( pixel        & 0x1F);
@@ -58,6 +63,23 @@ public:
 
   void onByteReceived(uint8_t _byte) override;
   void onEndTransaction() override;
+
+  void serialize(agent::JsonWriter& writer) const override;
+  bool apply(const agent::JsonValue& body, std::string& error) override;
+
+  /**
+   * Touch rects overlay: Marlin (TFT_COLOR_UI + TOUCH_SCREEN) sends its touch
+   * control rectangles with the custom panel command 0xF5 as the last stage of
+   * drawing a screen. When shown, they are composited over the panel image
+   * (2px white outline, 10% white interior) without changing graphic_ram, so
+   * they can be toggled at any time. Shared by all panels, like a view option.
+   */
+  struct TouchRect { uint16_t x, y, w, h; };
+  static std::atomic<bool> show_touch_rects;
+  size_t touch_rect_count() const { std::lock_guard<std::mutex> lock(touch_rects_mutex); return touch_rects.size(); }
+
+  // graphic_ram, or a copy in ram with the touch rects overlay composited
+  const uint16_t* composed(std::vector<uint16_t>& ram) const;
 
   static constexpr uint32_t width = TFT_WIDTH, height = TFT_HEIGHT;
   bool render_integer_scaling = false, render_popout = false;
@@ -93,4 +115,7 @@ public:
   GLuint texture_id;
 
   std::shared_ptr<XPT2046Device> touch;
+
+  mutable std::mutex touch_rects_mutex;
+  std::vector<TouchRect> touch_rects;
 };

@@ -12,6 +12,7 @@
 #include "../thermal_fault_blink.h"
 #include "../hardware/fat_image.h"
 #include "../hardware/SDCard.h"
+#include "../hardware/ST7796Device.h"
 
 #include "serial.h"
 #include <src/gcode/queue.h>
@@ -614,6 +615,39 @@ void handle_post_touch(const Request& request, Response& response) {
   response.json(writer.str());
 }
 
+#if ENABLED(TFT_INTERFACE_SPI)
+
+// POST /touch/rects — show or hide Marlin's touch control rectangles on the LCD
+//   {"show": true}   show       {"show": false}   hide       {}   toggle
+//
+// Marlin (simulator build) sends the rectangles as the last stage of drawing each
+// screen. They are drawn over the panel image with a 2px white outline and a 10%
+// white interior, in the window and in screenshots. Also a "Touch Rects" checkbox
+// on the display, and {"touch_rects": bool} on POST /component/<display>.
+void handle_post_touch_rects(const Request& request, Response& response) {
+  JsonValue body;
+  if (!request.body.empty() && !body.parse(request.body)) {
+    response.error(400, "body is not valid JSON");
+    return;
+  }
+  bool show = !ST7796Device::show_touch_rects;
+  body.get_bool("show", show);
+  ST7796Device::show_touch_rects = show;
+
+  auto display = std::static_pointer_cast<ST7796Device>(VirtualPrinter::find_component("ST7796Device Display"));
+  if (display) display->dirty = true;
+
+  JsonWriter writer;
+  writer.begin_object();
+  writer.member("ok", true);
+  writer.member("show", show);
+  writer.member("count", double(display ? display->touch_rect_count() : 0));
+  writer.end_object();
+  response.json(writer.str());
+}
+
+#endif // TFT_INTERFACE_SPI
+
 #endif // TOUCH_SCREEN
 
 // GET /ping — liveness probe that proves the simulation thread is servicing
@@ -988,6 +1022,9 @@ void register_routes() {
     server.route("GET /displays", handle_get_displays);
     #if ENABLED(TOUCH_SCREEN)
       server.route("POST /touch", handle_post_touch);
+      #if ENABLED(TFT_INTERFACE_SPI)
+        server.route("POST /touch/rects", handle_post_touch_rects);
+      #endif
     #endif
   #endif
 

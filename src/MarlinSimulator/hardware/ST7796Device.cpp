@@ -2,6 +2,7 @@
 #include <fstream>
 #include <cmath>
 #include <random>
+#include <algorithm>
 #include "Gpio.h"
 
 #include <gl.h>
@@ -11,6 +12,7 @@
 #include "../imgui_custom.h"
 
 #include "ST7796Device.h"
+#include "../agent/json.h"
 
 #include "../paths.h"
 #include MARLIN_HAL_PATH(tft/xpt2046.h)
@@ -19,6 +21,9 @@
 #define ST7796S_CASET      0x2A // Column Address Set
 #define ST7796S_RASET      0x2B // Row Address Set
 #define ST7796S_RAMWR      0x2C // Memory Write
+#define SIM_TOUCH_RECTS    0xF5 // Simulator only: Marlin's touch control rectangles
+
+std::atomic<bool> ST7796Device::show_touch_rects { false };
 
 ST7796Device::ST7796Device(SpiBus& spi_bus, pin_type tft_cs, SpiBus& touch_spi_bus, pin_type touch_cs, pin_type dc, pin_type beeper, pin_type enc1, pin_type enc2, pin_type enc_but, pin_type back, pin_type kill)
   : SPISlavePeripheral(spi_bus, tft_cs), dc_pin(dc), beeper_pin(beeper), enc1_pin(enc1), enc2_pin(enc2), enc_but_pin(enc_but), back_pin(back), kill_pin(kill) {
@@ -53,6 +58,58 @@ void ST7796Device::process_command(Command cmd) {
   else if (cmd.cmd == LCD_READ_ID) {
     setResponse((uint8_t*)&id_code, 4);
   }
+  else if (cmd.cmd == SIM_TOUCH_RECTS && cmd.data.size() >= 2) {
+    // count, then x, y, w, h per rect, all 16-bit big-endian. The command is
+    // also re-processed with no data at the next DC fall; that is ignored above.
+    auto word = [&](const size_t i) { return uint16_t((cmd.data[i] << 8) | cmd.data[i + 1]); };
+    const size_t count = word(0);
+    std::lock_guard<std::mutex> lock(touch_rects_mutex);
+    touch_rects.clear();
+    for (size_t i = 0, o = 2; i < count && o + 8 <= cmd.data.size(); ++i, o += 8)
+      touch_rects.push_back({ word(o), word(o + 2), word(o + 4), word(o + 6) });
+    dirty = true;
+  }
+}
+
+const uint16_t* ST7796Device::composed(std::vector<uint16_t>& ram) const {
+  if (!show_touch_rects) return graphic_ram;
+  std::lock_guard<std::mutex> lock(touch_rects_mutex);
+  if (touch_rects.empty()) return graphic_ram;
+
+  ram.assign(graphic_ram, graphic_ram + graphic_ram_size);
+  constexpr int line = 2;                       // Outline width
+  for (const auto &r : touch_rects) {
+    const int x0 = r.x, y0 = r.y,
+              x1 = std::min<int>(r.x + r.w, width), y1 = std::min<int>(r.y + r.h, height);
+    for (int y = y0; y < y1; ++y) {
+      for (int x = x0; x < x1; ++x) {
+        uint16_t &p = ram[x + y * width];
+        if (x < x0 + line || x >= x1 - line || y < y0 + line || y >= y1 - line)
+          p = 0xFFFF;                           // Outline: opaque white
+        else {                                  // Interior: 10% white
+          const uint16_t r5 = (p >> 11) & 0x1F, g6 = (p >> 5) & 0x3F, b5 = p & 0x1F;
+          p = uint16_t(((r5 + (31 - r5 + 5) / 10) << 11) | ((g6 + (63 - g6 + 5) / 10) << 5) | (b5 + (31 - b5 + 5) / 10));
+        }
+      }
+    }
+  }
+  return ram.data();
+}
+
+void ST7796Device::serialize(agent::JsonWriter& writer) const {
+  writer.begin_object();
+  writer.member("width", double(width));
+  writer.member("height", double(height));
+  writer.member("touch_rects", bool(show_touch_rects));
+  writer.member("touch_rect_count", double(touch_rect_count()));
+  writer.end_object();
+}
+
+bool ST7796Device::apply(const agent::JsonValue& body, std::string& error) {
+  bool flag;
+  if (body.get_bool("touch_rects", flag)) { show_touch_rects = flag; dirty = true; return true; }
+  error = "no recognised field (touch_rects)";
+  return false;
 }
 
 void ST7796Device::update() {
@@ -61,8 +118,10 @@ void ST7796Device::update() {
 
   if (dirty && delta > 1.0 / 30.0) {
     last_update = now;
+    std::vector<uint16_t> ram;
+    const uint16_t * const pixels = composed(ram);
     renderer::gl_assert_call(glBindTexture, GL_TEXTURE_2D, texture_id);
-    renderer::gl_assert_call(glTexImage2D, GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, graphic_ram);
+    renderer::gl_assert_call(glTexImage2D, GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, pixels);
     renderer::gl_assert_call(glBindTexture, GL_TEXTURE_2D, 0);
   }
 }
@@ -146,6 +205,9 @@ void ST7796Device::ui_widget() {
     if (ImGui::Checkbox("Integer Scaling", &render_integer_scaling))
       renderer::imgui_sharp_bilinear::set_texture_filter(texture_id, render_integer_scaling);
     ImGui::Checkbox("Popout", &render_popout);
+    ImGui::SameLine();
+    bool show_rects = show_touch_rects;
+    if (ImGui::Checkbox("Touch Rects", &show_rects)) { show_touch_rects = show_rects; dirty = true; }
 
     if (render_popout) {
       const imgui_custom::constraint_t constraint { width + imgui_custom::hfeat, height + imgui_custom::vfeat, (width) / (float)(height) };
