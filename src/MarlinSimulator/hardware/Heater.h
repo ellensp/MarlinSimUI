@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <functional>
 
 #include "Gpio.h"
 
@@ -38,7 +39,7 @@ public:
     Fixed       // Report sensor_fixed_temperature instead of the modeled temperature
   };
 
-  Heater(pin_type heater_pin, pin_type adc_pin, heater_data heater, hotend_data hotend, adc_data adc);
+  Heater(pin_type heater_pin, pin_type adc_pin, heater_data heater, hotend_data hotend, adc_data adc, pin_type fan_pin=-1);
   virtual ~Heater();
   void interrupt(GpioEvent& ev);
   void update();
@@ -82,4 +83,43 @@ public:
   temperature_sensor_mode m_temperature_sensor_mode {};
   double sensor_fixed_temperature = 25.0;  // Reading in Fixed mode (C)
   bool element_ok = true;                  // false = broken heater element: PWM delivers no power
+
+  /**
+   * Optional loads, all off by default so the plain model is unchanged.
+   * Matches the terms of Marlin's MPC model so a measured M306 can be replayed:
+   *   fan_xfer_coeff       (W/K) extra loss to ambient with the fan at 255 (MPC "F" term)
+   *   fan_heater_loss      (W)   heater power lost while the fan runs at 255 (supply sag)
+   *   filament_heat_capacity_permm (J/K/mm) energy carried away by extruded filament
+   *   sensor_responsiveness (1/s) thermistor lag behind the block (0 = sensor reads the block)
+   */
+  void set_fan_pin(pin_type pin) { fan_pin = pin; }
+  void set_filament_source(std::function<double()> src) { filament_mm = src; filament_last_mm = src ? src() : 0; }
+  double fan_fraction() const;
+
+  pin_type fan_pin = -1;
+  double fan_xfer_coeff = 0.0;
+  double fan_heater_loss = 0.0;
+  double filament_heat_capacity_permm = 0.0;
+  double sensor_responsiveness = 0.0;
+  double sensor_temperature = 25.0;   // Lagged thermistor temperature (= block when responsiveness is 0)
+  std::function<double()> filament_mm;
+  double filament_last_mm = 0.0;
+
+  // Instantaneous power terms from the last update, for observation (W)
+  double power_heater = 0, power_ambient = 0, power_fan = 0, power_filament = 0;
+
+  /**
+   * Fan-coupled sensor error (e.g. fan PWM interference on the thermistor line),
+   * scaled by fan duty and added to the reported reading only (not the physics):
+   *   fan_sensor_offset  (C)  steady error at fan 255
+   *   fan_sensor_ripple  (C)  sine amplitude at fan 255, period fan_sensor_ripple_period (s)
+   *   fan_sensor_noise   (C)  standard deviation of per-read gaussian noise at fan 255
+   */
+  double fan_sensor_offset = 0.0;
+  double fan_sensor_ripple = 0.0;
+  double fan_sensor_ripple_period = 5.0;
+  double fan_sensor_noise = 0.0;
+  double sensor_error = 0.0;          // Error added to the last reading (C)
+  uint64_t rng_state = 28420;         // Deterministic noise (xorshift; <random> clashes with Arduino.h macros)
+  double gaussian();
 };

@@ -153,7 +153,7 @@ Components opt in by overriding `Component::serialize()`. Implemented:
 | Component | Fields |
 | --- | --- |
 | Kinematic systems | Commanded position; per-effector position and stepper-derived position. |
-| `Heater` | Temperature, ambient, energy, sensor mode (`Normal`/`ForceMin`/`ForceMax`/`ForcePause`), PWM duty/period, volts, resistance, pins. |
+| `Heater` | Temperature, ambient, energy, sensor mode (`Normal`/`ForceMin`/`ForceMax`/`ForcePause`/`Fixed`), PWM duty/period, volts, resistance, pins; the thermal model in MPC units (`heater_power`, `heat_capacity`, `ambient_xfer`, `fan_xfer`, `fan_heater_loss`, `filament_heat_capacity_permm`, `sensor_responsiveness`), `sensor_reading`, `fan_pin`, `fan_fraction` and the live power terms `power_heater`/`power_ambient`/`power_fan`/`power_filament` (W), fan-coupled sensor error (`fan_sensor_offset`, `fan_sensor_ripple`, `fan_sensor_ripple_period`, `fan_sensor_noise`, last `sensor_error`). Settable: all model and sensor-error terms, `sensor_mode`, `sensor_temperature`, `element_ok`, `temperature`, `ambient_temperature`. |
 | `EndStop` | Effective trigger, geometric trigger, manual override, pin level, pin. |
 | `Touch` (XPT2046) | Raw x/y, dirty, held, polls, injected touches, calibration. |
 | `ST7796Device Display` | Width, height, `touch_rects` (overlay shown), `touch_rect_count`. Settable: `touch_rects`. |

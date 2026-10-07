@@ -298,7 +298,15 @@ void VirtualPrinter::build() {
   #endif
 
   #if HOTENDS
-    root->add_component<Heater>("Hotend0 Heater", HEATER_0_PIN, TEMP_0_PIN, heater_data{12, 3.6}, hotend_data{13, 20, 0.897}, adc_data{4700, 12});
+    {
+      // The part-cooling fan blows on hotend 0, and its filament carries heat away
+      auto h0 = root->add_component<Heater>("Hotend0 Heater", HEATER_0_PIN, TEMP_0_PIN, heater_data{12, 3.6}, hotend_data{13, 20, 0.897}, adc_data{4700, 12}
+        #ifdef FAN0_PIN
+          , FAN0_PIN
+        #endif
+      );
+      h0->set_filament_source([kinematics](){ return kinematics->state.effector_position.empty() ? 0.0 : double(kinematics->state.effector_position[0].position.w); });
+    }
     #if HOTENDS > 1
       root->add_component<Heater>("Hotend1 Heater", HEATER_1_PIN, TEMP_1_PIN, heater_data{12, 3.6}, hotend_data{13, 20, 0.897}, adc_data{4700, 12});
     #endif
