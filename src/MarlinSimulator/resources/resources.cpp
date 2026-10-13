@@ -22,18 +22,21 @@ namespace resource {
   }
 
   void FileResource::load() {
+    std::error_code ec;
+    m_modified = std::filesystem::last_write_time(m_path, ec);
     std::ifstream file(m_path, std::ios::binary | std::ios::ate);
-    m_modified = std::filesystem::last_write_time(m_path);
-    std::streamsize size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    m_data.reserve(size + 1);
-    if (file.read(m_data.data(), size)) {
-      m_buffer = m_data.data();
-      m_data[size] = 0;
-    } else {
-      m_data.clear();
-      m_buffer = {};
+    std::streamsize size = file ? std::streamsize(file.tellg()) : -1;
+    if (size >= 0 && file.seekg(0, std::ios::beg)) {
+      // resize, not reserve: the vector must own the bytes read into it, plus a null terminator for get_as_cstr
+      m_data.resize(size + 1);
+      if (file.read(m_data.data(), size)) {
+        m_data[size] = 0;
+        m_buffer = std::string_view(m_data.data(), size);
+        return;
+      }
     }
+    m_data.clear();
+    m_buffer = {};
   }
 
   bool FileResource::reload() {
