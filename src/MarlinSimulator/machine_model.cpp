@@ -674,9 +674,11 @@ void MachineModel::build_bedslinger() {
     add_part([&](VertexBuffer& b) {
       add_box(b, {lo.x - 25, lo.y + 18, all_lo.z - 34}, {hi.x + 25, hi.y + 88, plate_front}, color::printed);
       add_cold_ends(b, c);
-      // Hotends in front of the rearmost one hang from a nozzle holder: one block reaching
-      // forward from the plate at the top of the heatsinks, spanning every hotend in X
-      if (hi.z > all_lo.z) add_box(b, {lo.x - 12, lo.y + 38, plate_front}, {hi.x + 12, hi.y + 48, hi.z + 12}, color::printed);
+      // Nozzle holder: one block reaching forward from the plate face at the top of the
+      // heatsinks, spanning every hotend in X, so no nozzle is left floating. With one
+      // hotend (or several level in Z) lo and hi coincide, so the holder is centered on
+      // the carriage and still reaches 12mm past the nozzle tip.
+      add_box(b, {lo.x - 12, lo.y + 38, plate_front}, {hi.x + 12, hi.y + 48, hi.z + 12}, color::printed);
     }, c ? Animate([](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.x2_world); })
          : Animate([](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); }), false);
     // The probe hangs from the X1 carriage plate, bracketed to its nearest point
