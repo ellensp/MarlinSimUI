@@ -7,6 +7,8 @@
 
 #include <list>
 #include <deque>
+#include <string>
+#include <chrono>
 
 #include "../virtual_printer.h"
 #include "Gpio.h"
@@ -95,4 +97,21 @@ public:
 
   glm::ivec3 foreground_color = {0x81, 0xF2, 0xFF};
   glm::ivec3 background_color = {0x33, 0x01, 0xFC};
+
+  // Screenshots of the display contents
+  static constexpr int screenshot_scale = 4;
+  bool save_screenshot(const std::string &filename);
+  std::string last_screenshot;
+  const char *snapshot_path = nullptr;  // From MARLINSIM_LCD_SNAPSHOT, rewritten as the display changes
+  bool snapshot_pending = false;
+  std::chrono::steady_clock::time_point last_snapshot;
+
+  // Scripted input from MARLINSIM_LCD_SCRIPT, e.g. "7:click;9:snap=menu.bmp;10:down"
+  // Times are seconds from start. Actions: click, down, up, back, snap=<file>
+  struct ScriptStep { float time; std::string action; };
+  std::deque<ScriptStep> script;
+  std::chrono::steady_clock::time_point script_start, button_release, encoder_next;
+  int8_t encoder_pending = 0;
+  KeyName button_held = KeyName::COUNT;
+  void run_script();
 };

@@ -2,6 +2,8 @@
 #include <fstream>
 #include <cmath>
 #include <random>
+#include <ctime>
+#include <cstdlib>
 #include "Gpio.h"
 
 #include <gl.h>
@@ -28,6 +30,74 @@ ST7920Device::ST7920Device(pin_type clk, pin_type mosi, pin_type cs, pin_type be
   Gpio::attach(enc_but_pin, [this](GpioEvent& event){ this->interrupt(event); });
   Gpio::attach(back_pin, [this](GpioEvent& event){ this->interrupt(event); });
   Gpio::attach(kill_pin, [this](GpioEvent& event){ this->interrupt(event); });
+
+  snapshot_path = std::getenv("MARLINSIM_LCD_SNAPSHOT");
+  if (snapshot_path && !*snapshot_path) snapshot_path = nullptr;
+
+  if (const char *s = std::getenv("MARLINSIM_LCD_SCRIPT")) {
+    std::string str(s);
+    for (std::size_t pos = 0; pos < str.size();) {
+      std::size_t end = str.find(';', pos);
+      if (end == std::string::npos) end = str.size();
+      const std::string step = str.substr(pos, end - pos);
+      const std::size_t colon = step.find(':');
+      if (colon != std::string::npos) script.push_back({ std::stof(step.substr(0, colon)), step.substr(colon + 1) });
+      pos = end + 1;
+    }
+  }
+  script_start = clock.now();
+}
+
+void ST7920Device::run_script() {
+  const auto now = clock.now();
+
+  // Release a scripted button press after 150ms
+  if (button_held != KeyName::COUNT && now >= button_release) {
+    key_pressed[button_held] = false;
+    button_held = KeyName::COUNT;
+  }
+
+  // Step the encoder one quadrature state every 20ms so Marlin sees every state
+  if (encoder_pending && now >= encoder_next) {
+    encoder_position += encoder_pending > 0 ? 1 : -1;
+    encoder_pending += encoder_pending > 0 ? -1 : 1;
+    encoder_next = now + std::chrono::milliseconds(20);
+  }
+
+  const float elapsed = std::chrono::duration<float>(now - script_start).count();
+  while (!script.empty() && script.front().time <= elapsed && button_held == KeyName::COUNT && !encoder_pending) {
+    const std::string action = script.front().action;
+    script.pop_front();
+    auto press = [&](const KeyName k) { key_pressed[button_held = k] = true; button_release = now + std::chrono::milliseconds(150); };
+    if (action == "click") press(KeyName::ENCODER_BUTTON);
+    else if (action == "back") press(KeyName::BACK_BUTTON);
+    else if (action == "down") encoder_pending = 4;
+    else if (action == "up") encoder_pending = -4;
+    else if (action.rfind("snap=", 0) == 0) {
+      const std::string file = action.substr(5);
+      printf("ST7920 script: %.1fs %s %s\n", elapsed, save_screenshot(file) ? "saved" : "failed to save", file.c_str());
+    }
+    else printf("ST7920 script: unknown action '%s'\n", action.c_str());
+  }
+}
+
+// Save the display contents as a BMP, scaled up by screenshot_scale
+bool ST7920Device::save_screenshot(const std::string &filename) {
+  constexpr int w = width * screenshot_scale, h = height * screenshot_scale;
+  SDL_Surface *surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 24, SDL_PIXELFORMAT_RGB24);
+  if (!surface) return false;
+  for (int y = 0; y < h; y++) {
+    uint8_t *row = (uint8_t*)surface->pixels + y * surface->pitch;
+    for (int x = 0; x < w; x++) {
+      const auto &px = texture_data[(y / screenshot_scale) * width + (x / screenshot_scale)];
+      row[x * 3 + 0] = px.r;
+      row[x * 3 + 1] = px.g;
+      row[x * 3 + 2] = px.b;
+    }
+  }
+  const bool ok = SDL_SaveBMP(surface, filename.c_str()) == 0;
+  SDL_FreeSurface(surface);
+  return ok;
 }
 
 ST7920Device::~ST7920Device() {}
@@ -196,6 +266,7 @@ void ST7920Device::process_command(Command cmd) {
 
 void ST7920Device::update() {
   auto now = clock.now();
+  if (!script.empty() || button_held != KeyName::COUNT || encoder_pending) run_script();
   float delta = std::chrono::duration_cast<std::chrono::duration<float>>(now - last_update).count();
 
   if (dirty && delta > 1.0 / 30.0) {
@@ -267,6 +338,14 @@ void ST7920Device::update() {
     renderer::gl_assert_call(glBindTexture, GL_TEXTURE_2D, texture_id);
     renderer::gl_assert_call(glTexImage2D, GL_TEXTURE_2D, 0, GL_RGBA8, 128, 64, 0, GL_RGB, GL_UNSIGNED_BYTE, texture_data);
     renderer::gl_assert_call(glBindTexture, GL_TEXTURE_2D, 0);
+    snapshot_pending = snapshot_path != nullptr;
+  }
+
+  // Keep the snapshot file up to date, at most once per second
+  if (snapshot_pending && now - last_snapshot >= std::chrono::seconds(1)) {
+    last_snapshot = now;
+    snapshot_pending = false;
+    save_screenshot(snapshot_path);
   }
 }
 
@@ -328,6 +407,14 @@ void ST7920Device::ui_widget() {
     ImGui::GetCurrentWindow()->ScrollMax.y = 1.0f; // disable window scroll
     ImGui::Checkbox("Integer Scaling", &render_integer_scaling);
     ImGui::Checkbox("Popout", &render_popout);
+    ImGui::SameLine();
+    if (ImGui::Button("Screenshot")) {
+      char filename[64];
+      const std::time_t t = std::time(nullptr);
+      std::strftime(filename, sizeof(filename), "st7920_%Y%m%d_%H%M%S.bmp", std::localtime(&t));
+      last_screenshot = save_screenshot(filename) ? std::string("Saved ") + filename : std::string("Failed to save ") + filename;
+    }
+    if (!last_screenshot.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", last_screenshot.c_str());
 
     if (render_popout) {
       const imgui_custom::constraint_t constraint { width + imgui_custom::hfeat, height + imgui_custom::vfeat, (width) / (float)(height) };
