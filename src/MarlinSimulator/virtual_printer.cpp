@@ -357,6 +357,12 @@ void VirtualPrinter::build() {
 
   #if TEMP_SENSOR_BED
     root->add_component<Heater>("Bed Heater", HEATER_BED_PIN, TEMP_BED_PIN, heater_data{12, 1.2}, hotend_data{325, 824, 0.897}, adc_data{4700, 12});
+    #if HAS_BED_ZONES
+      // Zone 0 is the Bed Heater above. Each further zone has its own heater and thermistor.
+      constexpr pin_t zone_heater_pins[] = BED_ZONE_HEATER_PINS, zone_sensor_pins[] = BED_ZONE_SENSOR_PINS;
+      for (uint8_t z = 1; z < BED_ZONES_COUNT; ++z)
+        root->add_component<Heater>("Bed Zone " + std::to_string(z) + " Heater", zone_heater_pins[z], zone_sensor_pins[z], heater_data{12, 1.2}, hotend_data{325, 824, 0.897}, adc_data{4700, 12});
+    #endif
   #endif
 
   #if TEMP_SENSOR_CHAMBER

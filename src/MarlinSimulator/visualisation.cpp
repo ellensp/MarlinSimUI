@@ -541,7 +541,7 @@ void Visualisation::update_heat_tint(const bool gradient_enabled) {
   bed_tint = {};
   #if HAS_HEATED_BED
     if (bed_heater && !gradient_enabled)
-      bed_tint = heat_tint(bed_heater->hotend_temperature, thermalManager.temp_bed.target, 60, bed_ramp);
+      bed_tint = heat_tint(bed_heater->hotend_temperature, thermalManager.degTargetBed(), 60, bed_ramp);
   #else
     UNUSED(gradient_enabled);
   #endif
