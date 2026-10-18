@@ -364,27 +364,61 @@ void VirtualPrinter::build() {
   #endif
 
   #if ENABLED(FILAMENT_RUNOUT_SENSOR)
-    root->add_component<FilamentRunoutSensor>("Filament Runout Sensor 1", FIL_RUNOUT1_PIN, FIL_RUNOUT1_STATE);
+    // Sensor N watches extruder N-1. With FILAMENT_MOTION_SENSOR alone the runout pins carry
+    // encoder pulses; with FILAMENT_SWITCH_AND_MOTION they are switches and the motion pins pulse.
+    auto add_runout_sensor = [&](const char * const name, const pin_type pin, const bool state, const size_t e, const bool motion) {
+      auto sensor = root->add_component<FilamentRunoutSensor>(name, pin, state, motion);
+      sensor->set_filament_source([kinematics, e](){
+        const auto &ep = kinematics->state.effector_position;
+        return ep.empty() ? 0.0 : double(ep[e < ep.size() ? e : 0].position.w);
+      });
+    };
+    constexpr bool runout_pins_pulse = ENABLED(FILAMENT_MOTION_SENSOR) && DISABLED(FILAMENT_SWITCH_AND_MOTION);
+    add_runout_sensor("Filament Runout Sensor 1", FIL_RUNOUT1_PIN, FIL_RUNOUT1_STATE, 0, runout_pins_pulse);
     #if NUM_RUNOUT_SENSORS > 1
-      root->add_component<FilamentRunoutSensor>("Filament Runout Sensor 2", FIL_RUNOUT2_PIN, FIL_RUNOUT2_STATE);
+      add_runout_sensor("Filament Runout Sensor 2", FIL_RUNOUT2_PIN, FIL_RUNOUT2_STATE, 1, runout_pins_pulse);
     #endif
     #if NUM_RUNOUT_SENSORS > 2
-      root->add_component<FilamentRunoutSensor>("Filament Runout Sensor 3", FIL_RUNOUT3_PIN, FIL_RUNOUT3_STATE);
+      add_runout_sensor("Filament Runout Sensor 3", FIL_RUNOUT3_PIN, FIL_RUNOUT3_STATE, 2, runout_pins_pulse);
     #endif
     #if NUM_RUNOUT_SENSORS > 3
-      root->add_component<FilamentRunoutSensor>("Filament Runout Sensor 4", FIL_RUNOUT4_PIN, FIL_RUNOUT4_STATE);
+      add_runout_sensor("Filament Runout Sensor 4", FIL_RUNOUT4_PIN, FIL_RUNOUT4_STATE, 3, runout_pins_pulse);
     #endif
     #if NUM_RUNOUT_SENSORS > 4
-      root->add_component<FilamentRunoutSensor>("Filament Runout Sensor 5", FIL_RUNOUT5_PIN, FIL_RUNOUT5_STATE);
+      add_runout_sensor("Filament Runout Sensor 5", FIL_RUNOUT5_PIN, FIL_RUNOUT5_STATE, 4, runout_pins_pulse);
     #endif
     #if NUM_RUNOUT_SENSORS > 5
-      root->add_component<FilamentRunoutSensor>("Filament Runout Sensor 6", FIL_RUNOUT6_PIN, FIL_RUNOUT6_STATE);
+      add_runout_sensor("Filament Runout Sensor 6", FIL_RUNOUT6_PIN, FIL_RUNOUT6_STATE, 5, runout_pins_pulse);
     #endif
     #if NUM_RUNOUT_SENSORS > 6
-      root->add_component<FilamentRunoutSensor>("Filament Runout Sensor 7", FIL_RUNOUT7_PIN, FIL_RUNOUT7_STATE);
+      add_runout_sensor("Filament Runout Sensor 7", FIL_RUNOUT7_PIN, FIL_RUNOUT7_STATE, 6, runout_pins_pulse);
     #endif
     #if NUM_RUNOUT_SENSORS > 7
-      root->add_component<FilamentRunoutSensor>("Filament Runout Sensor 8", FIL_RUNOUT8_PIN, FIL_RUNOUT8_STATE);
+      add_runout_sensor("Filament Runout Sensor 8", FIL_RUNOUT8_PIN, FIL_RUNOUT8_STATE, 7, runout_pins_pulse);
+    #endif
+    #if ENABLED(FILAMENT_SWITCH_AND_MOTION)
+      add_runout_sensor("Filament Motion Sensor 1", FIL_MOTION1_PIN, false, 0, true);
+      #if NUM_MOTION_SENSORS > 1
+        add_runout_sensor("Filament Motion Sensor 2", FIL_MOTION2_PIN, false, 1, true);
+      #endif
+      #if NUM_MOTION_SENSORS > 2
+        add_runout_sensor("Filament Motion Sensor 3", FIL_MOTION3_PIN, false, 2, true);
+      #endif
+      #if NUM_MOTION_SENSORS > 3
+        add_runout_sensor("Filament Motion Sensor 4", FIL_MOTION4_PIN, false, 3, true);
+      #endif
+      #if NUM_MOTION_SENSORS > 4
+        add_runout_sensor("Filament Motion Sensor 5", FIL_MOTION5_PIN, false, 4, true);
+      #endif
+      #if NUM_MOTION_SENSORS > 5
+        add_runout_sensor("Filament Motion Sensor 6", FIL_MOTION6_PIN, false, 5, true);
+      #endif
+      #if NUM_MOTION_SENSORS > 6
+        add_runout_sensor("Filament Motion Sensor 7", FIL_MOTION7_PIN, false, 6, true);
+      #endif
+      #if NUM_MOTION_SENSORS > 7
+        add_runout_sensor("Filament Motion Sensor 8", FIL_MOTION8_PIN, false, 7, true);
+      #endif
     #endif
   #endif
 
