@@ -157,6 +157,8 @@ Components opt in by overriding `Component::serialize()`. Implemented:
 | `EndStop` | Effective trigger, geometric trigger, manual override, pin level, pin. |
 | `Touch` (XPT2046) | Raw x/y, dirty, held, polls, injected touches, calibration. |
 | `ST7796Device Display` | Width, height, `touch_rects` (overlay shown), `touch_rect_count`. Settable: `touch_rects`. |
+| `ST7565Device Display` | `display_on`, `inverted`, `all_pixels_on`, `page`, `column`, `start_line`, `command_bytes`, `data_bytes` (ST7565/ST7567/UC1701/LM6059 128x64 panels), and `backlight` `[r, g, b]` (0-255) on panels with an RGB backlight. |
+| `NeoPixelDevice` | `pin`, `led_count`, and `leds`: the last frame Marlin sent, as `[[r, g, b], ...]` (0-255), LED 0 first. |
 
 Others report `{}`. Prefer reporting simulated ground truth over Marlin's
 belief — the difference between the two is usually the bug.

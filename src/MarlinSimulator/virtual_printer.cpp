@@ -10,6 +10,7 @@
 #include "hardware/ST7796Device.h"
 #include "hardware/HD44780Device.h"
 #include "hardware/ST7920Device.h"
+#include "hardware/ST7565Device.h"
 #include "hardware/SDCard.h"
 #include "hardware/W25QxxDevice.h"
 #include "hardware/FilamentRunoutSensor.h"
@@ -426,6 +427,28 @@ void VirtualPrinter::build() {
     root->add_component<ST7796Device>("ST7796Device Display", spi_bus_by_pins<TFT_SCK_PIN, TFT_MOSI_PIN, TFT_MISO_PIN>(), TFT_CS_PIN, spi_bus_by_pins<TOUCH_SCK_PIN, TOUCH_MOSI_PIN, TOUCH_MISO_PIN>(), TOUCH_CS_PIN, TFT_DC_PIN, BEEPER_PIN, BTN_EN1, BTN_EN2, BTN_ENC, BTN_BACK, KILL_PIN);
   #elif defined(HAS_MARLINUI_HD44780)
     root->add_component<HD44780Device>("HD44780Device Display", LCD_PINS_RS, LCD_PINS_EN, LCD_PINS_D4, LCD_PINS_D5, LCD_PINS_D6, LCD_PINS_D7, BEEPER_PIN, BTN_EN1, BTN_EN2, BTN_ENC, BTN_BACK, KILL_PIN);
+  #elif HAS_MARLINUI_U8GLIB && (ANY(CARTESIO_UI, FYSETC_MINI_12864, MKS_MINI_12864, ENDER2_STOCKDISPLAY, MINIPANEL) || IS_U8GLIB_LM6059_AF || IS_U8GLIB_ST7565_64128N)
+    // ST7565-family panels, on the shared SPI bus
+    #ifdef ST7565_XOFFSET
+      constexpr uint8_t st7565_column_offset = ST7565_XOFFSET;
+    #else
+      constexpr uint8_t st7565_column_offset = TERN0(IS_U8GLIB_LM6059_AF, 1);  // U8glib's LM6059 device starts at column 1
+    #endif
+    #if defined(LCD_SCREEN_ROTATE) && LCD_SCREEN_ROTATE == 180
+      constexpr bool st7565_rotate_180 = true;    // Panel mounted upside down
+    #else
+      constexpr bool st7565_rotate_180 = false;
+    #endif
+    root->add_component<ST7565Device>("ST7565Device Display", spi_bus_by_pins<SD_SCK_PIN, SD_MOSI_PIN, SD_MISO_PIN>(), DOGLCD_CS, DOGLCD_A0, st7565_column_offset, st7565_rotate_180, BEEPER_PIN, BTN_EN1, BTN_EN2, BTN_ENC, BTN_BACK, KILL_PIN);
+    #if ANY(FYSETC_MINI_12864_1_2, FYSETC_MINI_12864_2_0) && ENABLED(RGB_LED)
+      // Red, green and blue backlight LEDs, each on its own pin. PWM_PIN is false here, so Marlin
+      // drives them as plain outputs: each LED is on or off.
+      get_component<ST7565Device>("ST7565Device Display")->set_backlight([](glm::vec3& color) {
+        auto lit = [](const pin_type pin) { return Gpio::get_pin_value(pin) ? 1.0f : 0.0f; };
+        color = { lit(RGB_LED_R_PIN), lit(RGB_LED_G_PIN), lit(RGB_LED_B_PIN) };
+        return true;
+      });
+    #endif
   #elif defined(HAS_MARLINUI_U8GLIB)
     root->add_component<ST7920Device>("ST7920Device Display", LCD_PINS_D4, LCD_PINS_EN, LCD_PINS_RS, BEEPER_PIN, BTN_EN1, BTN_EN2, BTN_ENC, BTN_BACK, KILL_PIN);
   #endif
@@ -435,7 +458,16 @@ void VirtualPrinter::build() {
   #endif
 
   #ifdef NEOPIXEL_LED
-    root->add_component<NeoPixelDevice>("NeoPixelDevice", NEOPIXEL_PIN, NEOPIXEL_TYPE, NEOPIXEL_PIXELS);
+    auto neopixel = root->add_component<NeoPixelDevice>("NeoPixelDevice", NEOPIXEL_PIN, NEOPIXEL_TYPE, NEOPIXEL_PIXELS);
+    #if ENABLED(FYSETC_MINI_12864_2_1)
+      // The panel's first NeoPixel is the LCD backlight; the other two light the encoder knob
+      get_component<ST7565Device>("ST7565Device Display")->set_backlight([neopixel](glm::vec3& color) {
+        ImVec4 led;
+        if (!neopixel->led_color(0, led)) return false;
+        color = { led.x, led.y, led.z };
+        return true;
+      });
+    #endif
   #endif
 
   #ifdef BEEPER_PIN
