@@ -2,6 +2,7 @@
 
 #include "pinmapping.h"
 #include "NeoPixelDevice.h"
+#include "../agent/json.h"
 
 NeoPixelDevice::NeoPixelDevice(pin_type neopixel_pin, const uint8_t led_type, const uint16_t led_count) : VirtualPrinter::Component("NeoPixel"), neopixel_pin(neopixel_pin), led_type(led_type), led_count(led_count) {
   bits_per_word = led_type == NEO_GRBW ? 32 : 24;
@@ -31,17 +32,35 @@ void NeoPixelDevice::update() {
     state = SignalState::INACTIVE;
     bit_count = 0;
     data_word = 0;
+    frame_index = 0;
   }
 }
 
 void NeoPixelDevice::ui_widget() {
-  for (auto led : leds_display) {
-    ImGui::Text("|"); ImGui::SameLine();
+  for (size_t i = 0; i < leds_display.size(); i++) {
+    const ImVec4 &led = leds_display[i];
+    ImGui::Text("%2zu |", i); ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Text, led);
     ImGui::Text("LED");
     ImGui::PopStyleColor();
-    ImGui::SameLine(); ImGui::Text("|");
+    ImGui::SameLine(); ImGui::Text("| R %3d G %3d B %3d", int(led.x * 255 + 0.5f), int(led.y * 255 + 0.5f), int(led.z * 255 + 0.5f));
   }
+}
+
+// Last frame Marlin sent: "leds" is [[r, g, b], ...] (0-255), LED 0 first
+void NeoPixelDevice::serialize(agent::JsonWriter& writer) const {
+  writer.begin_object();
+  writer.member("pin", int64_t(neopixel_pin));
+  writer.member("led_count", int64_t(led_count));
+  writer.key("leds");
+  writer.begin_array();
+  for (const auto& led : leds_display) {
+    writer.begin_array();
+    for (const float c : { led.x, led.y, led.z }) writer.value(int64_t(std::lround(c * 255)));
+    writer.end_array();
+  }
+  writer.end_array();
+  writer.end_object();
 }
 
 // models energy transfer but not time lag as it tranfers through the medium.
@@ -50,6 +69,7 @@ void NeoPixelDevice::interrupt(GpioEvent& ev) {
     auto timestamp = Kernel::TimeControl::ticksToNanos(ev.timestamp);
     auto data = (uint32_t)(timestamp - last_clock);
     last_clock = timestamp;
+    bool new_frame = false;
 
     switch (state) {
       case SignalState::INACTIVE:
@@ -64,19 +84,13 @@ void NeoPixelDevice::interrupt(GpioEvent& ev) {
         else { state = SignalState::INACTIVE;}
         break;
       case SignalState::LOW_ZERO:
-        ++ bit_count;
-        data_word <<= 1;
-        if (data > 450 && data < 5000 && ev.event == ev.RISE) {
-          state = SignalState::HIGH;
-        } else { state = SignalState::INACTIVE; }
-        break;
       case SignalState::LOW_ONE:
         ++ bit_count;
         data_word <<= 1;
-        ++ data_word;
-        if (data > 450 && data < 5000 && ev.event == ev.RISE) {
-          state = SignalState::HIGH;
-        } else { state = SignalState::INACTIVE; }
+        if (state == SignalState::LOW_ONE) ++ data_word;
+        if (ev.event != ev.RISE || data <= 450) { state = SignalState::INACTIVE; }
+        else if (data < 5000) { state = SignalState::HIGH; }
+        else { new_frame = true; }  // A long low is a latch: this rise starts the next frame
         break;
     }
 
@@ -85,6 +99,13 @@ void NeoPixelDevice::interrupt(GpioEvent& ev) {
       bit_count = 0;
       update_led(data_word);
       data_word = 0;
+    }
+
+    if (new_frame) {
+      frame_index = 0;
+      bit_count = 0;
+      data_word = 0;
+      state = SignalState::HIGH;
     }
   }
 }
@@ -96,6 +117,9 @@ void NeoPixelDevice::update_led(uint32_t colour) {
   float green =  (((0xFF << (idx * 8)) & colour) >> (idx * 8)) / 255.0;
   idx = 3 - (led_type & 0x03);
   float blue  =  (((0xFF << (idx * 8)) & colour) >> (idx * 8)) / 255.0;
-  leds_display.push_back(ImVec4(red, green, blue, 1.0f));
-  if (leds_display.size() > led_count) leds_display.pop_front();
+  // Each frame fills the LEDs from the first, so a short or long frame can't shift them
+  const ImVec4 led(red, green, blue, 1.0f);
+  if (frame_index < leds_display.size()) leds_display[frame_index] = led;
+  else if (leds_display.size() < led_count) leds_display.push_back(led);
+  frame_index++;
 }

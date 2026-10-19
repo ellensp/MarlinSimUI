@@ -54,7 +54,15 @@ public:
   void interrupt(GpioEvent& ev);
   void update();
   void ui_widget();
+  void serialize(agent::JsonWriter& writer) const override;
   void update_led(uint32_t color);
+
+  // Colour of LED 'index' in the last frame Marlin sent, or false if none has arrived yet
+  bool led_color(const size_t index, ImVec4& color) const {
+    if (index >= leds_display.size()) return false;
+    color = leds_display[index];
+    return true;
+  }
 
   pin_type neopixel_pin;
   uint64_t last_clock = 0;
@@ -66,6 +74,7 @@ public:
   } state = SignalState::INACTIVE;
   uint8_t bit_count = 0;
   uint32_t data_word = 0;
+  uint16_t frame_index = 0;  // LED the next decoded word is for
   uint32_t bits_per_word;
   const uint8_t led_type;
   const uint16_t led_count;
