@@ -13,11 +13,12 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include "renderer/renderer.h"
 
 // Simple-geometry models size themselves from the Marlin config.
-enum MachineType : uint8_t { MACHINE_BEDSLINGER, MACHINE_CUBE, MACHINE_DELTA, MACHINE_SCARA, MACHINE_TYPE_COUNT };
+enum MachineType : uint8_t { MACHINE_BEDSLINGER, MACHINE_CUBE, MACHINE_DELTA, MACHINE_SCARA, MACHINE_BELT, MACHINE_TYPE_COUNT };
 
 // Placement of the moving parts for one frame
 struct MachinePose {
@@ -29,6 +30,7 @@ struct MachinePose {
   glm::vec2 scara_angles {};  // SCARA: direction of the upper arm and of the forearm (degrees CCW from Marlin +X)
   glm::vec3 x2_world {};      // IDEX: origin of the X2 carriage (its X, the X1 nozzle's height and depth)
   float probe_raise = 0;      // Bed probe lift above its deployed position (BLTouch stowed)
+  glm::quat head_turn { 1, 0, 0, 0 }; // Belt printer: the tilt of the frame, applied to parts that turn with the toolhead
 };
 
 // Delta geometry, from the Marlin config (DELTA_RADIUS, DELTA_DIAGONAL_ROD,
@@ -47,15 +49,27 @@ struct ScaraGeometry {
 
 // Set by --machine on the command line; MACHINE_TYPE_COUNT = use the Marlin config
 extern MachineType machine_type_option;
+// Set by --belt-angle: belt printer gantry tilt in degrees; 0 = the default (MachineModel::belt_default_tilt)
+extern float belt_angle_option;
 MachineType machine_type_from_name(const char* name); // MACHINE_TYPE_COUNT if unknown
 
 class MachineModel {
 public:
   static const char* type_name(const MachineType type);
   static MachineType default_type();  // From the Marlin kinematics (DELTA, IS_CORE, ...)
-  static bool is_available(const MachineType type); // DELTA builds: Delta only. SCARA builds: SCARA only. Otherwise: Bedslinger and Cube.
+  static bool is_available(const MachineType type); // DELTA builds: Delta only. SCARA: SCARA only. BELTPRINTER: Belt only. Otherwise: Bedslinger and Cube.
   static DeltaGeometry default_delta();
   static ScaraGeometry default_scara();
+
+  // Belt printer (BELTPRINTER). Marlin Y moves the nozzle up a gantry tilted by belt_tilt_deg() from the belt,
+  // and Marlin Z feeds the belt. Y = 0 is the tip on the belt; larger Y rises toward the exit end, so the tip is
+  // Y*sin(tilt) above the belt and Y*cos(tilt) along it. Marlin +X points toward GL -x (the slicer mirrors X too).
+  // This is the inverse of the slicer's machine-frame transform (OrcaSlicer MachineFrameTransform).
+  static constexpr float belt_default_tilt = 45;       // Degrees between the belt and the gantry
+  static float belt_tilt_deg();                        // --belt-angle, else belt_default_tilt
+  static glm::mat3 belt_frame_rotation();              // Frame-local (X right, up, -Y back) to world
+  static glm::vec3 belt_contact();                     // World position of the tip at X = 0, Y = 0
+  static glm::vec3 belt_nozzle_world(const glm::vec3 marlin); // Tip in world GL, belt feed (Z) not applied
 
   void build(const MachineType type, std::shared_ptr<renderer::ShaderProgram> program);
   void destroy();
@@ -131,6 +145,7 @@ private:
   void build_cube();
   void build_delta();
   void build_scara();
+  void build_belt();
 
   std::vector<Part> parts;
   std::shared_ptr<renderer::ShaderProgram> program;

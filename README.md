@@ -87,15 +87,21 @@ Command-line options:
 | `--agent-port <n>` | Enable the agent interface on `127.0.0.1:<n>` (or `MARLIN_SIM_AGENT_PORT`). |
 | `--serial-port <n>` | TCP port for the raw G-code socket (default 8099, or `MARLIN_SIM_SERIAL_PORT`). |
 | `--no-audio` | Disable buzzer emulation. |
-| `--machine <type>` | Viewport printer model: `bedslinger`, `cube`, `delta` or `scara`. |
+| `--machine <type>` | Viewport printer model: `bedslinger`, `cube`, `delta`, `scara` or `belt`. |
+| `--belt-angle <deg>` | Belt printer gantry tilt from the belt, 1 to 89 degrees (default 45). |
 
 ### 3D printer models in the Viewport
 
 The Viewport draws a whole printer that moves with the simulation, sized from
 your configuration (bed size, Z height, delta geometry).
 
-- **Bedslinger** (i3 style), **Cube** (head on top, bed moves in Z), **Delta** and **SCARA** (one arm over a Z bed).
-  DELTA builds show the Delta, SCARA builds the SCARA; other builds offer the Bedslinger and the Cube.
+- **Bedslinger** (i3 style), **Cube** (head on top, bed moves in Z), **Delta**, **SCARA** (one arm over a Z bed)
+  and **Belt Printer** (`BELTPRINTER`: a cube frame without bottom or back, tilted over two rollers and a belt).
+  DELTA builds show the Delta, SCARA builds the SCARA, BELTPRINTER builds the Belt Printer; other builds offer the Bedslinger and the Cube.
+- **Belt printer:** Marlin Y moves the nozzle up the tilted gantry (Y=0 is the tip on the belt) and Z feeds the belt
+  toward the open front. The simulator draws the physical result of the G-code it receives, so G-code sliced for
+  a belt printer (for example by OrcaSlicer's belt mode) prints upright. The print rides the belt away from the nozzle.
+  X is mirrored, as in the slicer's belt profiles. The tilt is `--belt-angle`.
   Choose one in the **Printer** menu, with `--machine`, or with `POST /view`.
 - **Multiple hotends:** one hotend per `HOTENDS`, placed at its tool offset. The
   model follows `M218`, `M501` and anything else that changes the offsets.

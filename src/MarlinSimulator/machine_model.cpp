@@ -128,6 +128,15 @@ static void add_sphere(VertexBuffer& buf, const glm::vec3 c, const float radius,
     }
 }
 
+// Flat band (a belt run) from a to b, 'width' wide across the world X axis. Drawn from both sides: with
+// back-face culling a single quad would vanish when seen from behind.
+static void add_ribbon(VertexBuffer& buf, const glm::vec3 a, const glm::vec3 b, const float width, const glm::vec4 col) {
+  const glm::vec3 x { width * 0.5f, 0, 0 };
+  const glm::vec3 n = glm::normalize(glm::cross(glm::vec3(1, 0, 0), b - a));
+  add_quad(buf, a - x, a + x, b + x, b - x,  n, col);
+  add_quad(buf, a - x, a + x, b + x, b - x, -n, col);
+}
+
 // Hotend parts. The hot end (nozzle and heater block, tip at the origin) is its own mesh
 // so it can be tinted by temperature; the cold end (heat break and heatsink, over a tip
 // at 'at') is part of the carriage.
@@ -150,7 +159,8 @@ static void move_to(renderer::Mesh& m, const glm::vec3 pos) { m.m_position = pos
 
 // SCARA: a part fixed to the forearm turns about the vertical through its origin. It is as modeled
 // (in Marlin's XY frame) when the forearm points along +Y, and turns with the forearm's direction from there.
-static glm::quat arm_turn(const MachinePose& p) { return glm::angleAxis(glm::radians(p.scara_angles.y - 90.0f), glm::vec3(0, 1, 0)); }
+// A belt printer's toolhead also turns with the frame's tilt (head_turn, identity for other types).
+static glm::quat arm_turn(const MachinePose& p) { return p.head_turn * glm::angleAxis(glm::radians(p.scara_angles.y - 90.0f), glm::vec3(0, 1, 0)); }
 static void turn_with_arm(renderer::Mesh& m, const MachinePose& p, const bool turns) {
   m.m_rotation = turns ? arm_turn(p) : glm::quat(1, 0, 0, 0);
 }
@@ -370,6 +380,7 @@ ScaraGeometry MachineModel::default_scara() {
 }
 
 MachineType machine_type_option = MACHINE_TYPE_COUNT;
+float belt_angle_option = 0;
 
 MachineType machine_type_from_name(const char* name) {
   const std::string n = name;
@@ -377,6 +388,7 @@ MachineType machine_type_from_name(const char* name) {
   if (n == "cube" || n == "corexy")      return MACHINE_CUBE;
   if (n == "delta")                      return MACHINE_DELTA;
   if (n == "scara")                      return MACHINE_SCARA;
+  if (n == "belt" || n == "beltprinter") return MACHINE_BELT;
   return MACHINE_TYPE_COUNT;
 }
 
@@ -386,21 +398,23 @@ const char* MachineModel::type_name(const MachineType type) {
     case MACHINE_CUBE:       return "Cube (Z-Bed)";
     case MACHINE_DELTA:      return "Delta";
     case MACHINE_SCARA:      return "SCARA";
+    case MACHINE_BELT:       return "Belt Printer";
     default:                 return "?";
   }
 }
 
 // The model must match the simulated kinematics: a DELTA build shows only the Delta,
 // a SCARA build only the SCARA, and Cartesian / Core builds can switch between the
-// Cartesian-style layouts.
-// TODO: BELTPRINTER model.
+// Cartesian-style layouts. A BELTPRINTER build shows only the belt printer.
 bool MachineModel::is_available(const MachineType type) {
   #if ENABLED(DELTA)
     return type == MACHINE_DELTA;
   #elif ENABLED(SCARA)
     return type == MACHINE_SCARA;
+  #elif ENABLED(BELTPRINTER)
+    return type == MACHINE_BELT;
   #else
-    return type < MACHINE_TYPE_COUNT && type != MACHINE_DELTA && type != MACHINE_SCARA;
+    return type < MACHINE_TYPE_COUNT && type != MACHINE_DELTA && type != MACHINE_SCARA && type != MACHINE_BELT;
   #endif
 }
 
@@ -409,6 +423,8 @@ MachineType MachineModel::default_type() {
     return MACHINE_DELTA;
   #elif ENABLED(SCARA)
     return MACHINE_SCARA;
+  #elif ENABLED(BELTPRINTER)
+    return MACHINE_BELT;
   #elif IS_CORE || ANY(MARKFORGED_XY, MARKFORGED_YX)
     return MACHINE_CUBE;
   #else
@@ -505,6 +521,7 @@ void MachineModel::build(const MachineType new_type, std::shared_ptr<renderer::S
     case MACHINE_CUBE:  build_cube();  break;
     case MACHINE_DELTA: build_delta(); break;
     case MACHINE_SCARA: build_scara(); break;
+    case MACHINE_BELT:  build_belt(); break;
     default:            build_bedslinger(); break;
   }
 }
@@ -543,6 +560,16 @@ MachinePose MachineModel::pose(const glm::vec3 nozzle, const float x2) const {
       // The nozzle stays at the top; the bed drops as Z increases
       p.bed_offset = { 0, bed_z - nozzle.z, 0 };
       break;
+    case MACHINE_BELT: {
+      // The nozzle rides the tilted gantry (X across, Y up the slope) and never moves with Z: the belt does.
+      // The belt, and the print on it, travel with Z.
+      p.bed_offset = { 0, 0, nozzle.z };
+      p.nozzle_world = belt_nozzle_world(nozzle);
+      p.x2_world = belt_nozzle_world({ x2, nozzle.y, nozzle.z });
+      p.head_turn = glm::quat_cast(belt_frame_rotation());
+      p.scara_angles = { 0, 90 };   // No arm turn: arm_turn(p) is then just head_turn
+      return p;
+    }
     default: break; // Delta: the bed is fixed
   }
   p.nozzle_world = glm::vec3(nozzle.x, nozzle.z, -nozzle.y) + p.bed_offset;
@@ -1229,4 +1256,262 @@ void MachineModel::build_scara() {
   // The probe's bracket reaches the end cylinder, which looks the same at any arm angle
   add_probe([=](const glm::vec2 q) { const float l = glm::length(q); return l > hub_r ? q * (hub_r / l) : q; }, fy0 - hub_extra, fy1 + hub_extra, true, true);
   add_hot_parts(true);
+}
+
+//
+// Belt printer (BELTPRINTER)
+//
+// Marlin Y moves the nozzle up a gantry tilted by belt_tilt_deg() from the belt, and Marlin Z feeds the belt
+// (endless: CR-30 sets Z_MAX_POS 20000000, so bed_z is never used here). Y = 0 is the tip on the belt;
+// the tip is Y*sin(tilt) above it and Y*cos(tilt) along it, toward the exit. That is the inverse of the
+// slicer's machine-frame transform (OrcaSlicer: Y = h/sin, Z = y + h*cot), so G-code sliced for a belt
+// printer draws upright and un-sheared with no conversion here.
+//
+// The frame is the Cube's, modeled in its own axes (X right, up, Marlin Y toward -z) and turned into place
+// by belt_frame_rotation(): no bottom and no back, leaning back by the tilt. Its open bottom and open back
+// both face the exit. Marlin +X points toward GL -x, which keeps the model-to-machine map a rotation (the
+// slicer's "Rev X"); a print is mirrored if X goes the other way.
+//
+// The extrusion trail is stored in belt space (nozzle world position minus the belt feed) and drawn at
+// pose.bed_offset = (0, 0, Z), so it rides the belt like the Cube's print rides its bed (see
+// Visualisation::set_head_position).
+//
+float MachineModel::belt_tilt_deg() { return belt_angle_option > 0 ? belt_angle_option : belt_default_tilt; }
+
+glm::mat3 MachineModel::belt_frame_rotation() {
+  const float a = glm::radians(belt_tilt_deg()), s = std::sin(a), c = std::cos(a);
+  // Columns: where frame X, up and (Marlin -Y) go in the world
+  return glm::mat3(glm::vec3(-1, 0, 0), glm::vec3(0, c, -s), glm::vec3(0, -s, -c));
+}
+
+glm::vec3 MachineModel::belt_contact() { return { bed_x, 0, 0 }; }
+
+glm::vec3 MachineModel::belt_nozzle_world(const glm::vec3 m) {
+  return belt_contact() + belt_frame_rotation() * glm::vec3(m.x, 0, -m.y);
+}
+
+namespace belt_parts {
+  constexpr float roller_r = 20, belt_t = 2;        // Roller radius and belt thickness
+  constexpr float roller_out = 12;                  // Rollers stick out past the belt on each side
+  constexpr float base_w = 20;                      // Bottom frame rails: 20mm extrusion, like the struts
+  constexpr float foot_margin = 15;                 // The belt and base reach this far past the strut feet
+  constexpr float stripe_pitch = 40, stripe_w = 6;  // Cross stripes that make the belt feed visible
+  constexpr float pulley_r = 9, roller_pulley_r = 12, pulley_w = 8; // Z drive loop: motor pulley, roller pulley, and their length (8mm)
+  constexpr float loop_w = 6;                       // The belt loop is 6mm wide (a GT2 belt)
+  constexpr float loop_shift = 1;                   // The loop sits this far toward the belt (inward) so it reads as centered on the 8mm gears
+  constexpr float xext = 20;                        // The X axis is one 20x20 extrusion, as on the CR-30
+  constexpr float gantry_end_half = 12, gantry_end_depth = 22; // Gantry end blocks: half width (X) and half depth (Z), smaller than the Cube's
+  constexpr glm::vec4 body   { 0.10f, 0.10f, 0.11f, 1.0f };
+  constexpr glm::vec4 stripe { 0.34f, 0.35f, 0.38f, 1.0f };
+}
+
+//
+// The frame is a right triangle seen from the side, modeled on the CR-30 (a left and a right one, joined at the
+// peak and at the base). Corners: R (rear foot), P (peak), F (front foot):
+//
+//                      P            peak: crossbar between the two sides; the AB motors sit just under it
+//                    /   \ 
+//     front strut  /       \  rear strut     the struts meet at a right angle, so the base is the hypotenuse:
+//                /           \                sqrt(2) x a strut at 45 degrees, plus a little at each end
+//              F ______________ R
+//        exit (front)  <-- +Z        rear     the belt runs along the base and travels toward F as Z increases
+//
+// The nozzle meets the belt at R, about where the belt flattens out at the rear roller (Marlin Y = 0). Marlin Y
+// climbs the rear strut from R toward P. (The base is horizontal in the world and the rear strut rises toward P.)
+//
+// - Rear struts: along the gantry's Y direction, at the height of the Y rails, from the peak end down to the
+//   base. The rails hang on their inner faces.
+// - Front struts: perpendicular to the rear struts, from the peak down to the base on the exit side. The AB
+//   (CoreXY) motors sit on their inner faces, just under the peak crossbar, i.e. inside the peak of the triangle.
+//   A Cartesian build keeps the same mounts for its X motor(s).
+// - Base: bottom rails under the strut feet. The belt starts and ends at the feet; its rollers are carried by
+//   the base through short bearing blocks.
+// - Z (belt) motor: on the inner face of the rear-right strut, near its foot (right = GL +x, the right side seen
+//   from the exit end, which is the default view). A short belt loop joins its pulley to the end of the rear roller.
+//
+// Everything is modeled in the frame's own axes (X right, up, Marlin -Y back) and turned into place with
+// belt_frame_rotation(): local y is "up" from the gantry plane, local z = -Marlin Y, local x = Marlin X.
+//
+void MachineModel::build_belt() {
+  using namespace cube;
+  using namespace belt_parts;
+  constexpr bool is_core = ANY(IS_CORE, MARKFORGED_XY, MARKFORGED_YX);
+  const glm::mat3 R = belt_frame_rotation();
+  const glm::vec3 C = belt_contact();
+  const float tilt = glm::radians(belt_tilt_deg()), s = std::sin(tilt), c = std::cos(tilt);
+
+  bounds_min = bounds_max = C;   // build() starts from the Cartesian bed; Z_MAX_POS is endless here
+
+  // Parts are modeled in the frame's axes and turned into place. Fixed parts also move to the contact
+  // point; moving ones are placed by their animation.
+  auto bake = [R, C](VertexBuffer& b, const bool fixed) {
+    for (auto& v : b.data()) {
+      v.position = R * v.position + (fixed ? C : glm::vec3(0));
+      v.normal = R * v.normal;
+    }
+  };
+  auto frame_part = [&](std::function<void(VertexBuffer&)> geometry, const bool fixed, Animate animate = nullptr, const bool in_bounds = true) {
+    return add_part([&, geometry, fixed](VertexBuffer& b) { geometry(b); bake(b, fixed); }, animate, in_bounds);
+  };
+
+  //
+  // Belt constants (world). The base height is where the struts end, so it comes first.
+  //
+  constexpr float R_o = roller_r + belt_t;      // Outer radius where the belt wraps a roller
+  const float bx0 = -10, bx1 = bed_x + 10;      // Belt width: a little wider than the X travel
+  const float y_c = bed_top - R_o;              // Roller axes: the top run is tangent to the belt surface (Z0)
+  const float y_base = y_c + base_w * 0.5f;     // Top of the bottom rails, where the struts end
+
+  // The Z motor sits on the rear-right strut. Its inboard face must clear the roller stub and the belt-loop
+  // pulley, so the right strut is placed to leave exactly that room, and the frame is wider on that side.
+  const float x_loop = bx1 + roller_out + 6;                  // World x of the belt loop (pulleys), just past the roller end
+  const float x_face = x_loop + pulley_w * 0.5f + 1;          // World x of the motor's inboard face
+
+  //
+  // Frame size, in the frame's own axes
+  //
+  glm::vec3 all_lo, all_hi;
+  hotend_extent(all_lo, all_hi);
+  const float rail_y = rail_top_gap, xrod_y = rail_y + xrod_rise;   // Y rails, and X rods above them
+  const float strut_y = rail_y;                                      // Struts are centered on the Y rails' height
+  const float head_top = all_hi.y + 85;                              // Toolhead tops
+  float reach_l, reach_r;
+  carriage_reach(head_margin, reach_l, reach_r);
+  const float yrail[2] = { reach_l - gantry_end_half, reach_r + gantry_end_half }; // Gantry ends
+  const float gm_bottom = std::max(xrod_y + 12, head_top + 2);       // Cartesian Y motor, clear of the toolheads
+
+  // Struts are just outside the gantry. The right strut (local x0, world +x) is pushed out to make room for the Z motor.
+  const float x0 = std::min(yrail[0] - 10 - w, C.x - w - nema17 - x_face);   // Local x of the right strut's outer face
+  const float x1 = yrail[1] + 10 + w;                                         // And the left strut's
+
+  // Gantry travel in local z (= -Marlin Y): the frame's inner limits behind and in front of the gantry
+  const float in_b = std::min(-float(Y_MAX_POS) - gantry_end_depth - 10, -float(Y_MAX_POS) + all_lo.z - head_margin - 10);
+  const float in_f = std::max(-float(Y_MIN_POS) + gantry_end_depth + 10, -float(Y_MIN_POS) + all_hi.z + head_margin + 10);
+
+  // Triangle corners (local z of the rear strut's two ends)
+  const float z0 = in_b - w - nema17;                                  // Peak end: room behind the gantry for the AB motors
+  const float z_foot = std::max((c * strut_y - y_base) / s, in_f + 12); // Foot end: where the strut centerline meets the base, but past the rails
+  const float y_peak = c * strut_y - s * (z0 + w * 0.5f);              // World height of the peak
+  const float t_front = (y_peak - y_base) / c;                         // Front strut length, local -y from the peak down to the base
+
+  // World z of the two feet, from the frame transform: world z = -sin*y - cos*z
+  const float z_rear = -s * strut_y - c * z_foot;                      // Rear foot R
+  const float z_front = -s * strut_y - c * (z0 + w * 0.5f) + s * t_front; // Front foot F
+
+  // The belt starts and ends just past the feet; roller centers are one roller radius inside its ends
+  const float rear_c = z_rear - foot_margin + R_o, front_c = z_front + foot_margin - R_o;
+
+  //
+  // The fixed frame: struts, peak crossbar, Y rails with their mounts, AB motors, and the Z motor with its pulley
+  //
+  const float zm = z_foot - nema17 * 0.5f - 4;                         // Local z of the Z motor, just above the rear foot
+  const float x_loop_l = C.x - x_loop;                                 // The belt loop's plane in local x
+  frame_part([&](VertexBuffer& b) {
+    for (const float x : { x0, x1 - w }) {
+      add_box(b, {x, strut_y - w * 0.5f, z0}, {x + w, strut_y + w * 0.5f, z_foot}, color::frame);   // Rear strut: peak to rear foot
+      add_box(b, {x, strut_y - t_front, z0}, {x + w, strut_y + w * 0.5f, z0 + w}, color::frame);    // Front strut: peak to front foot
+    }
+    add_box(b, {x0 + w, strut_y - w * 0.5f, z0}, {x1 - w, strut_y + w * 0.5f, z0 + w}, color::frame); // Peak crossbar
+
+    for (int i = 0; i < 2; ++i) {
+      // Y rail on the strut's inner side, held at both ends by printed mounts that fasten to the strut
+      const float x = yrail[i], inner = i ? x1 - w : x0 + w;   // The strut's inner face: mounts start there (not at the outer face, which would z-fight)
+      add_cylinder(b, {x, strut_y, z0 + 5}, {x, strut_y, in_f + 5}, rod_r, color::rod);
+      add_box(b, {inner, strut_y - 10, z0}, {x + in(i) * 10, strut_y + 10, z0 + 20}, color::printed);
+      add_box(b, {inner, strut_y - 10, in_f - 8}, {x + in(i) * 10, strut_y + 10, in_f + 12}, color::printed);
+      // AB (CoreXY) motors, or the Cartesian X motor(s): on the front struts' inner faces, tucked under the crossbar
+      // inside the peak, and behind the gantry's travel so the carriage never meets them
+      if (is_core || i == 0 || ENABLED(HAS_X2_STEPPER))
+        add_motor(b, {i ? x1 - w - nema17 * 0.5f : x0 + w + nema17 * 0.5f, strut_y - w * 0.5f - nema17 * 0.5f, z0 + nema17 * 0.5f});
+    }
+
+    // Z (belt) motor on the right rear strut's inner face, with its shaft and pulley reaching the belt loop
+    add_motor(b, {x0 + w + nema17 * 0.5f, strut_y, zm});
+    add_cylinder(b, {x0 + w + nema17, strut_y, zm}, {x_loop_l + pulley_w * 0.5f, strut_y, zm}, 2.5f, color::rod, 10);
+    add_cylinder(b, {x_loop_l - pulley_w * 0.5f, strut_y, zm}, {x_loop_l + pulley_w * 0.5f, strut_y, zm}, pulley_r, color::joint, 16);   // Gray gear
+  }, true);
+
+  //
+  // X gantry, which rides the Y rails with the nozzle: one 20x20 extrusion across (as on the CR-30), the two end
+  // blocks that ride the rails, and on Cartesian machines the Y motor on the far end (both ends with Y2). The toolhead
+  // rides the extrusion, so it is drawn around it.
+  //
+  frame_part([&](VertexBuffer& b) {
+    add_box(b, {yrail[0], xrod_y - xext * 0.5f, -xext * 0.5f}, {yrail[1], xrod_y + xext * 0.5f, xext * 0.5f}, color::frame);
+    for (int i = 0; i < 2; ++i)   // End blocks: from just under the rail up to the top of the extrusion
+      add_box(b, {yrail[i] - gantry_end_half, rail_y - 10, -gantry_end_depth}, {yrail[i] + gantry_end_half, xrod_y + xext * 0.5f, gantry_end_depth}, color::printed);
+    if (!is_core) {
+      // Y motor on a riser from the end block, its bottom clear of the toolheads
+      for (const int i : { 1, 0 }) {
+        if (i == 0 && !ENABLED(HAS_Y2_STEPPER)) continue;
+        if (gm_bottom > xrod_y + 12) add_box(b, {yrail[i] - gantry_end_half, xrod_y + 12, -nema17 * 0.5f}, {yrail[i] + gantry_end_half, gm_bottom, nema17 * 0.5f}, color::printed);
+        add_motor(b, {yrail[i], gm_bottom + nema17 * 0.5f, 0});
+      }
+    }
+  }, false, [R, C](renderer::Mesh& m, const MachinePose& p) { move_to(m, C + R * glm::vec3(0, 0, -p.nozzle.y)); }, false);
+
+  // Toolhead(s), which follow their nozzles, each enclosing its hotends' heatsinks
+  for (int cc = 0; cc < carriage_count(); ++cc) {
+    glm::vec3 lo, hi;
+    hotend_extent(lo, hi, cc);
+    const glm::vec3 blo { lo.x - head_margin, lo.y + 30, all_lo.z - head_margin }, bhi { hi.x + head_margin, hi.y + 85, all_hi.z + head_margin };
+    frame_part([&, cc](VertexBuffer& b) {
+      add_box(b, blo, bhi, color::printed);
+      add_cold_ends(b, cc);
+    }, false, cc ? Animate([](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.x2_world); })
+                 : Animate([](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); }), false);
+  }
+  add_hot_parts(true);   // Heater blocks turn with the frame (pose.head_turn)
+
+  //
+  // The belt and its base, in world coordinates: the bottom rails under the strut feet, the two rollers (carried by
+  // the base through bearing blocks), the top and return runs, and the short belt loop from the Z motor to the
+  // rear roller. The belt spans the feet plus a small margin.
+  //
+  const float zb0 = z_rear - foot_margin, zb1 = z_front + foot_margin;       // Base and belt ends (world z)
+  const glm::vec3 motor_pulley = C + R * glm::vec3(x_loop_l, strut_y, zm);   // Z motor pulley center, world
+  add_part([&](VertexBuffer& b) {
+    // Bottom rails, directly under the struts
+    for (const float x : { x0, x1 - w })
+      add_box(b, {C.x - x - w, y_base - base_w, zb0}, {C.x - x, y_base, zb1}, color::frame);
+    add_box(b, {bx0, bed_top - belt_t, rear_c}, {bx1, bed_top, front_c}, body);             // Top run, tangent to Z0
+    add_box(b, {bx0, y_c - R_o, rear_c}, {bx1, y_c - R_o + belt_t, front_c}, body);         // Return run
+    for (const float zc : { rear_c, front_c }) {
+      add_cylinder(b, {bx0, y_c, zc}, {bx1, y_c, zc}, R_o, body, 24);                       // Belt around the roller
+      // Roller: past the belt on both sides. The rear roller's right end reaches the belt loop pulley.
+      const float xr = (zc == rear_c) ? x_loop + pulley_w * 0.5f : bx1 + roller_out;
+      add_cylinder(b, {bx0 - roller_out, y_c, zc}, {xr, y_c, zc}, roller_r - 1, color::rod, 20);
+      // Bearing blocks: from each roller end to the base rail. The rear roller's right end is carried by its pulley.
+      const float left_inner = C.x - (x1 - w), right_inner = C.x - (x0 + w);
+      add_box(b, {left_inner, y_c - 8, zc - 10}, {bx0 - roller_out, y_c + 8, zc + 10}, color::printed);
+      if (zc != rear_c) add_box(b, {bx1 + roller_out, y_c - 8, zc - 10}, {right_inner, y_c + 8, zc + 10}, color::printed);
+    }
+    // Belt loop: a gray 8mm gear on the roller end, and the two 6mm-wide runs between it and the Z motor gear
+    add_cylinder(b, {x_loop - pulley_w * 0.5f, y_c, rear_c}, {x_loop + pulley_w * 0.5f, y_c, rear_c}, roller_pulley_r, color::joint, 16);
+    const glm::vec2 d { motor_pulley.z - rear_c, motor_pulley.y - y_c };                    // (z, y) from roller to motor
+    const float len = glm::length(d);
+    if (len > 1) {
+      const glm::vec2 n { -d.y / len, d.x / len };                                          // Perpendicular, in the (z, y) plane
+      for (const float sgn : { -1.0f, 1.0f }) {
+        const float xl = x_loop - loop_shift;   // Inward is toward the belt: world -x on this (+x) side
+        const glm::vec3 p0 { xl, y_c + sgn * n.y * roller_pulley_r, rear_c + sgn * n.x * roller_pulley_r },
+                        p1 { xl, motor_pulley.y + sgn * n.y * pulley_r, motor_pulley.z + sgn * n.x * pulley_r };
+        add_ribbon(b, p0, p1, loop_w, body);
+      }
+    }
+  });
+
+  //
+  // Stripes scroll with the belt feed: the top run toward the exit with +Z, the return run the other way. They are
+  // placed so a full pitch of travel never carries one past an end of the belt.
+  //
+  auto stripe_z = [](const float z) { return z - std::floor(z / stripe_pitch) * stripe_pitch; }; // Feed within one pitch
+  add_part([&](VertexBuffer& b) {
+    for (float z = rear_c; z + stripe_pitch + stripe_w <= front_c; z += stripe_pitch)
+      add_box(b, {bx0, bed_top - 0.5f, z}, {bx1, bed_top + 0.15f, z + stripe_w}, stripe);
+  }, [stripe_z](renderer::Mesh& m, const MachinePose& p) { move_to(m, {0, 0, stripe_z(p.nozzle.z)}); });
+  add_part([&](VertexBuffer& b) {
+    for (float z = rear_c + stripe_pitch; z + stripe_w <= front_c; z += stripe_pitch)
+      add_box(b, {bx0, y_c - R_o - 0.15f, z}, {bx1, y_c - R_o + 0.5f, z + stripe_w}, stripe);
+  }, [stripe_z](renderer::Mesh& m, const MachinePose& p) { move_to(m, {0, 0, -stripe_z(p.nozzle.z)}); });
 }

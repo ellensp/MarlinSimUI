@@ -74,6 +74,18 @@ static PerspectiveCamera initCamera = {
   glm::radians(45.0f), 2.0f, 5000.0f // FOV, Near, Far (near > 1 keeps depth precision for whole-printer views)
 };
 
+// Where the nozzle is drawn in the extrusion mesh's space (GL), from the simulated position (X, Y, Z, E).
+// Most machines draw it at (X, Z, -Y) and the mesh moves with the bed. A belt printer deposits at the tilted
+// nozzle and the belt carries the print away, so the trail is stored in the belt's own frame: the nozzle's
+// world position less the belt feed, which pose.bed_offset = (0, 0, Z) puts back (see MachineModel::belt_nozzle_world).
+static glm::vec4 trail_position(const MachineType type, const glm::vec4 sim) {
+  if (type == MACHINE_BELT) {
+    const glm::vec3 world = MachineModel::belt_nozzle_world({ sim.x, sim.y, sim.z });
+    return { world.x, world.y, world.z - sim.z, sim.w };
+  }
+  return { sim.x, sim.z, sim.y * -1.0, sim.w };
+}
+
 void Visualisation::create() {
   //
   // Load shaders (extrusion + default)
@@ -274,9 +286,9 @@ void Visualisation::create() {
   if (kin != nullptr && kin->state.effector_position.size() == extrusion.size()) {
     size_t i = 0;
     for (auto state : kin->state.effector_position) {
-      glm::vec4 pos = {state.position.x, state.position.z, state.position.y * -1.0, state.position.w};
-      extrusion[i].last_position = pos;
-      extrusion[i].position = pos;
+      const glm::vec4 pos = {state.position.x, state.position.z, state.position.y * -1.0, state.position.w};
+      extrusion[i].last_position = trail_position(machine.type, state.position);
+      extrusion[i].position = pos;   // The raw position: update() converts it back to Marlin XYZ
       ++i;
     }
   }
@@ -422,6 +434,7 @@ void Visualisation::update() {
     bed_mesh->m_position = pose.bed_offset;
     bed_mesh->m_transform_dirty = true;
   }
+  bed_mesh->m_visible = machine.type != MACHINE_BELT;   // The belt is its own surface
 
   // Bed markings follow the bed surface and Marlin's probe, mesh and homing settings
   if (bed_markings.visible) {
@@ -432,6 +445,9 @@ void Visualisation::update() {
       m->m_transform_dirty = true;
     }
   }
+
+  if (auto m = renderer::get_mesh_by_id(bed_markings.mesh))
+    m->m_visible = bed_markings.visible && machine.type != MACHINE_BELT;   // They describe a flat bed
 
   // Delta printable volume follows the active tool and Marlin's delta settings
   reach_volume.update();
@@ -565,7 +581,8 @@ void Visualisation::destroy() {
 void Visualisation::set_head_position(size_t hotend_index, extruder_state& state) {
   if (!m_initialised || hotend_index >= extrusion.size()) return;
   glm::vec4 sim_pos = state.position;
-  glm::vec4 position = {sim_pos.x, sim_pos.z, sim_pos.y * -1.0, sim_pos.w}; // correct for opengl coordinate system
+  const glm::vec4 raw = {sim_pos.x, sim_pos.z, sim_pos.y * -1.0, sim_pos.w}; // correct for opengl coordinate system
+  const glm::vec4 position = trail_position(machine.type, sim_pos);        // Where the trail is drawn (belt: in the belt's frame)
   std::scoped_lock extrusion_lock(extrusion_mutex);
   auto& extruder = extrusion[hotend_index];
   glm::vec3 extrude_color = state.color;
@@ -574,7 +591,7 @@ void Visualisation::set_head_position(size_t hotend_index, extruder_state& state
   if (!active_mesh) return;
   auto active_buffer = active_mesh->buffer<renderer::vertex_data_t>();
 
-  if (position != extruder.position) {
+  if (raw != extruder.position) {
 
     // smooths out extrusion over a minimum length to fill in gaps todo: implement an simulation to do this better
     // also use Z (Y in opengl) change to reduce minimum extrude length
@@ -624,7 +641,7 @@ void Visualisation::set_head_position(size_t hotend_index, extruder_state& state
       active_buffer->add_vertex(active_buffer->cdata().back());
       extruder.last_position = position;
     }
-    extruder.position = position;
+    extruder.position = raw;   // Marlin's position, which update() reads back for the printer model
   }
 }
 

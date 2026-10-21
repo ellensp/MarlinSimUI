@@ -35,7 +35,8 @@ Command-line options:
 | `--agent-port <n>` | Enable the agent interface on `127.0.0.1:<n>` (or `MARLIN_SIM_AGENT_PORT`). Off by default. |
 | `--serial-port <n>` | TCP port for the raw G-code socket (default 8099, or `MARLIN_SIM_SERIAL_PORT`). |
 | `--no-audio` | Disable buzzer/audio emulation (useful for unattended runs). |
-| `--machine <type>` | Viewport printer model: `bedslinger`, `cube`, `delta` or `scara`. Default follows the build's kinematics. DELTA builds accept only `delta`, SCARA builds only `scara`; other builds accept `bedslinger` and `cube`. |
+| `--machine <type>` | Viewport printer model: `bedslinger`, `cube`, `delta`, `scara` or `belt`. Default follows the build's kinematics. DELTA builds accept only `delta`, SCARA builds only `scara`, BELTPRINTER builds only `belt`; other builds accept `bedslinger` and `cube`. |
+| `--belt-angle <deg>` | Belt printer gantry tilt from the belt, 1 to 89 degrees (default 45). Ignored by other models. |
 | `--help` | Usage. |
 
 The simulator does not exit on its own. Stop it with `POST /kernel/control
@@ -177,7 +178,7 @@ target.
 | `distance` | mm from the target, > 0. |
 | `x`, `y`, `z` | Camera target in Marlin coordinates (mm). All three or none. |
 | `follow` | `true` keeps the nozzle at the view center. |
-| `machine` | `bedslinger`, `cube`, `delta` or `scara`; same availability rule as `--machine`. |
+| `machine` | `bedslinger`, `cube`, `delta`, `scara` or `belt`; same availability rule as `--machine`. |
 | `markings` | `true`/`false` shows or hides the bed markings (origin, safe homing point, probeable area, tool reach, mesh grid), like Printer > Bed Markings. |
 | `volume` | `true`/`false` shows or hides the translucent printable volume of the active tool, like Printer > Printable Volume. DELTA builds only; always `false` otherwise. |
 

@@ -77,8 +77,9 @@ static void print_usage(const char* argv0) {
   printf("  --agent-port <n>    Enable the HTTP agent control interface on 127.0.0.1:<n>\n");
   printf("                      (also settable via MARLIN_SIM_AGENT_PORT)\n");
   printf("  --no-audio          Disable audio/buzzer emulation\n");
-  printf("  --machine <type>    Printer model in the Viewport: bedslinger, cube, delta, scara\n");
-  printf("                      (default: from the Marlin configuration; DELTA and SCARA builds allow only their own)\n");
+  printf("  --machine <type>    Printer model in the Viewport: bedslinger, cube, delta, scara, belt\n");
+  printf("                      (default: from the Marlin configuration; DELTA, SCARA and BELTPRINTER builds allow only their own)\n");
+  printf("  --belt-angle <deg>  Belt printer gantry tilt from the belt, 1-89 (default %g)\n", MachineModel::belt_default_tilt);
   printf("  --help              Show this message\n");
 }
 
@@ -123,13 +124,22 @@ static bool parse_command_line(int argc, char** argv, CommandLineOptions& option
     }
     else if (strcmp(arg, "--machine") == 0) {
       if (i + 1 >= argc || (machine_type_option = machine_type_from_name(argv[++i])) == MACHINE_TYPE_COUNT) {
-        fprintf(stderr, "--machine requires one of: bedslinger, cube, delta, scara\n");
+        fprintf(stderr, "--machine requires one of: bedslinger, cube, delta, scara, belt\n");
         return false;
       }
       if (!MachineModel::is_available(machine_type_option)) {
-        fprintf(stderr, "--machine %s: not available for this build's kinematics (DELTA builds show only 'delta', SCARA builds only 'scara')\n", argv[i]);
+        fprintf(stderr, "--machine %s: not available for this build's kinematics (DELTA builds show only 'delta', SCARA builds only 'scara', BELTPRINTER builds only 'belt')\n", argv[i]);
         return false;
       }
+    }
+    else if (strcmp(arg, "--belt-angle") == 0) {
+      char* end = nullptr;
+      const float angle = i + 1 < argc ? strtof(argv[++i], &end) : 0.0f;
+      if (end == nullptr || *end != '\0' || !(angle >= 1.0f && angle <= 89.0f)) {
+        fprintf(stderr, "--belt-angle requires an angle in degrees from 1 to 89\n");
+        return false;
+      }
+      belt_angle_option = angle;
     }
     else if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
       print_usage(argv[0]);

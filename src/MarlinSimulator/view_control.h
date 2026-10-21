@@ -23,7 +23,7 @@ struct Request {
   bool markings = true; // Bed markings shown
   bool volume = false;  // Delta printable volume shown
   std::string preset;  // home, front, right, back, left, top, iso
-  std::string machine; // bedslinger, cube, delta, scara
+  std::string machine; // bedslinger, cube, delta, scara, belt
 };
 
 struct State {
