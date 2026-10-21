@@ -220,17 +220,32 @@ struct Inputs {
       #elif ENABLED(AUTO_BED_LEVELING_LINEAR)
         live = false;
       #endif
-      for (uint8_t i = 0; i < GRID_MAX_POINTS_X; ++i) {
+
+      // Number of grid points. With VARIABLE_GRID_POINTS the mesh may use fewer than the maximum.
+      uint8_t nx = GRID_MAX_POINTS_X, ny = GRID_MAX_POINTS_Y;
+      #if ENABLED(VARIABLE_GRID_POINTS)
+        if (live) { nx = bedlevel.nr_grid_points.x; ny = bedlevel.nr_grid_points.y; }
+      #endif
+      #ifdef GRID_MIN_SPACING
+        // G29 uses fewer points where they would be closer than GRID_MIN_SPACING
+        if (!live) {
+          const xy_uint8_t r = reduced_grid_points({ probe.max_x() - probe.min_x(), probe.max_y() - probe.min_y() },
+                                                   { nx, ny }, { GRID_MIN_SPACING, GRID_MIN_SPACING });
+          nx = r.x; ny = r.y;
+        }
+      #endif
+
+      for (uint8_t i = 0; i < nx; ++i) {
         #if HAS_MESH
           if (live) { grid_x.push_back(bedlevel.get_mesh_x(i)); continue; }
         #endif
-        grid_x.push_back(probe.min_x() + (probe.max_x() - probe.min_x()) * i / (GRID_MAX_POINTS_X - 1));
+        grid_x.push_back(probe.min_x() + (probe.max_x() - probe.min_x()) * i / (nx - 1));
       }
-      for (uint8_t j = 0; j < GRID_MAX_POINTS_Y; ++j) {
+      for (uint8_t j = 0; j < ny; ++j) {
         #if HAS_MESH
           if (live) { grid_y.push_back(bedlevel.get_mesh_y(j)); continue; }
         #endif
-        grid_y.push_back(probe.min_y() + (probe.max_y() - probe.min_y()) * j / (GRID_MAX_POINTS_Y - 1));
+        grid_y.push_back(probe.min_y() + (probe.max_y() - probe.min_y()) * j / (ny - 1));
       }
       UNUSED(live);
     #endif
