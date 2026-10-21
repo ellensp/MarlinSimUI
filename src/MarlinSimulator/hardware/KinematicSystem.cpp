@@ -12,6 +12,15 @@
   #include <src/module/probe.h> // probe.offset (M851)
 #endif
 
+// How far up an unhomed machine's Z may start. Normally anywhere in the lower eighth of its travel. A belt
+// printer's Z is endless (the CR-30 example sets Z_MAX_POS 20000000), which would start the belt millions of
+// mm from its endstop and make G28 effectively never finish.
+#if ENABLED(BELTPRINTER)
+  constexpr int z_start_span = 100;
+#else
+  constexpr int z_start_span = (int)((Z_MAX_POS / 8) - Z_MIN_POS);
+#endif
+
 constexpr float steps_per_unit[] = DEFAULT_AXIS_STEPS_PER_UNIT;
 constexpr bool extruder_invert_dir[EXTRUDERS] = {
 #ifdef INVERT_E0_DIR
@@ -219,7 +228,7 @@ CartesianKinematicSystem::CartesianKinematicSystem(std::function<void(kinematic_
   hardware_offset.push_back(glm::vec3{
     (rand() % (int)((X_MAX_POS / 4) - X_MIN_POS)) + X_MIN_POS,
     (rand() % (int)((Y_MAX_POS / 4) - Y_MIN_POS)) + Y_MIN_POS,
-    (rand() % (int)((Z_MAX_POS / 8) - Z_MIN_POS)) + Z_MIN_POS
+    (rand() % z_start_span) + Z_MIN_POS
   });
 
   #if ENABLED(DUAL_X_CARRIAGE)
@@ -332,7 +341,7 @@ CoreXYKinematicSystem::CoreXYKinematicSystem(std::function<void(kinematic_state&
   hardware_offset.push_back(glm::vec3{
     (rand() % (int)((X_MAX_POS / 4) - X_MIN_POS)) + X_MIN_POS,
     (rand() % (int)((Y_MAX_POS / 4) - Y_MIN_POS)) + Y_MIN_POS,
-    (rand() % (int)((Z_MAX_POS / 8) - Z_MIN_POS)) + Z_MIN_POS
+    (rand() % z_start_span) + Z_MIN_POS
   });
 }
 
@@ -393,7 +402,7 @@ CoreXZKinematicSystem::CoreXZKinematicSystem(std::function<void(kinematic_state&
   hardware_offset.push_back(glm::vec3{
     (rand() % (int)((X_MAX_POS / 4) - X_MIN_POS)) + X_MIN_POS,
     (rand() % (int)((Y_MAX_POS / 4) - Y_MIN_POS)) + Y_MIN_POS,
-    (rand() % (int)((Z_MAX_POS / 8) - Z_MIN_POS)) + Z_MIN_POS
+    (rand() % z_start_span) + Z_MIN_POS
   });
 }
 
@@ -451,7 +460,7 @@ CoreYZKinematicSystem::CoreYZKinematicSystem(std::function<void(kinematic_state&
   hardware_offset.push_back(glm::vec3{
     (rand() % (int)((X_MAX_POS / 4) - X_MIN_POS)) + X_MIN_POS,
     (rand() % (int)((Y_MAX_POS / 4) - Y_MIN_POS)) + Y_MIN_POS,
-    (rand() % (int)((Z_MAX_POS / 8) - Z_MIN_POS)) + Z_MIN_POS
+    (rand() % z_start_span) + Z_MIN_POS
   });
 }
 
@@ -509,7 +518,7 @@ CoreYXKinematicSystem::CoreYXKinematicSystem(std::function<void(kinematic_state&
   hardware_offset.push_back(glm::vec3{
     (rand() % (int)((X_MAX_POS / 4) - X_MIN_POS)) + X_MIN_POS,
     (rand() % (int)((Y_MAX_POS / 4) - Y_MIN_POS)) + Y_MIN_POS,
-    (rand() % (int)((Z_MAX_POS / 8) - Z_MIN_POS)) + Z_MIN_POS
+    (rand() % z_start_span) + Z_MIN_POS
   });
 }
 
@@ -567,7 +576,7 @@ CoreZXKinematicSystem::CoreZXKinematicSystem(std::function<void(kinematic_state&
   hardware_offset.push_back(glm::vec3{
     (rand() % (int)((X_MAX_POS / 4) - X_MIN_POS)) + X_MIN_POS,
     (rand() % (int)((Y_MAX_POS / 4) - Y_MIN_POS)) + Y_MIN_POS,
-    (rand() % (int)((Z_MAX_POS / 8) - Z_MIN_POS)) + Z_MIN_POS
+    (rand() % z_start_span) + Z_MIN_POS
   });
 }
 
@@ -625,7 +634,7 @@ CoreZYKinematicSystem::CoreZYKinematicSystem(std::function<void(kinematic_state&
   hardware_offset.push_back(glm::vec3{
     (rand() % (int)((X_MAX_POS / 4) - X_MIN_POS)) + X_MIN_POS,
     (rand() % (int)((Y_MAX_POS / 4) - Y_MIN_POS)) + Y_MIN_POS,
-    (rand() % (int)((Z_MAX_POS / 8) - Z_MIN_POS)) + Z_MIN_POS
+    (rand() % z_start_span) + Z_MIN_POS
   });
 }
 
