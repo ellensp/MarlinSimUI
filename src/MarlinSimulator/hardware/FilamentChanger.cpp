@@ -12,6 +12,58 @@
 
 FilamentChanger* FilamentChanger::instance = nullptr;
 
+//
+// The Prusa MMU2 as Marlin's mmu2.cpp sees it: text lines in, "ok" lines out.
+//   X0 reset -> "start"    S1/S2 -> version/build + "ok"   P0 -> FINDA (1 if filament) + "ok"
+//   T<n> load filament n   U0/E<n> unload                  L, C0, R0, F, M1 -> "ok"
+//
+class Mmu2Device : public FauxSerialDevice {
+public:
+  Mmu2Device(FilamentChanger& changer, const int stream) : FauxSerialDevice(stream), changer(changer) {}
+
+protected:
+  void on_line(const std::string& line) override {
+    if (line.empty()) return;
+    const char c = line[0];
+    const int arg = line.size() > 1 ? atoi(line.c_str() + 1) : 0;
+    if (line == "X0") { changer.note("MMU reset"); reply("start\n", 200); }
+    else if (line == "S1") reply("9ok\n");
+    else if (line == "S2") reply(ENABLED(MMU2_MODE_12V) ? "132ok\n" : "126ok\n");
+    else if (line == "P0") { std::scoped_lock lock(changer.mutex); reply(std::string(changer.loaded >= 0 ? "1" : "0") + "ok\n"); }
+    else if (c == 'T' || c == 'L') {
+      changer.note("MMU <= " + line);
+      reply("ok\n", changer.command_ms, [this, arg]{ changer.mmu_set_loaded(arg); });
+    }
+    else if (c == 'U' || c == 'E') {
+      changer.note("MMU <= " + line);
+      reply("ok\n", changer.command_ms, [this]{ changer.mmu_set_loaded(-1); });
+    }
+    else if (c == 'C' || c == 'R') reply("ok\n", changer.command_ms);
+    else if (c == 'F' || c == 'M') reply("ok\n");
+    // 'A' (abort) has no reply
+  }
+
+private:
+  FilamentChanger& changer;
+};
+
+void FilamentChanger::note(const std::string& text) {
+  std::scoped_lock lock(mutex);
+  log_event(text);
+}
+
+void FilamentChanger::mmu_set_loaded(const int tool) {
+  std::scoped_lock lock(mutex);
+  loaded = (tool >= 0 && size_t(tool) < slot_count) ? tool : -1;
+  status = loaded >= 0 ? "T" + std::to_string(loaded) + " loaded." : "Unloaded.";
+  log_event("MMU => " + status);
+}
+
+void FilamentChanger::attach_mmu2(const int stream) {
+  serial_stream = stream;
+  serial_device = std::make_unique<Mmu2Device>(*this, stream);
+}
+
 static const glm::vec3 no_filament_color { 0.3f, 0.3f, 0.3f };
 
 FilamentChanger::FilamentChanger(const char* model, size_t slot_count)
@@ -118,7 +170,8 @@ void FilamentChanger::observe(const glm::vec3& marlin_position) {
 void FilamentChanger::ui_widget() {
   std::scoped_lock lock(mutex);
   ImGui::Text("%s (%d filaments)", model.c_str(), int(slot_count));
-  ImGui::Text("Button: %s   Last hold: %u ms   Axis: %.2f", pressed ? "PRESSED" : "released", last_hold_ms, axis_position);
+  if (serial_device) ImGui::Text("Serial: stream %d", serial_stream);
+  else ImGui::Text("Button: %s   Last hold: %u ms   Axis: %.2f", pressed ? "PRESSED" : "released", last_hold_ms, axis_position);
   ImGui::Text("Loaded: %s", loaded >= 0 ? ("T" + std::to_string(loaded)).c_str() : "none");
   ImGui::TextWrapped("%s", status.c_str());
   if (ImGui::TreeNode("Button history")) {
@@ -152,8 +205,11 @@ void FilamentChanger::ui_widget() {
     if (i + 1 < slot_count) ImGui::SameLine(0, 12);
   }
   ImGui::SeparatorText("Timing");
-  ImGui::InputInt("Pulse (ms)", &pulse_ms, 10, 100);
-  ImGui::InputInt("Min feed press (ms)", &min_feed_ms, 100, 1000);
+  if (serial_device) ImGui::InputInt("MMU command time (ms)", &command_ms, 100, 1000);
+  else {
+    ImGui::InputInt("Pulse (ms)", &pulse_ms, 10, 100);
+    ImGui::InputInt("Min feed press (ms)", &min_feed_ms, 100, 1000);
+  }
   if (ImGui::Button("Unload")) { loaded = -1; phase = Phase::Ready; status = "Unloaded (UI)."; }
   ImGui::SameLine();
   if (ImGui::Button("Reset")) { loaded = -1; selected = -1; phase = Phase::Ready; status = "Reset."; }
@@ -170,6 +226,7 @@ void FilamentChanger::serialize(agent::JsonWriter& writer) const {
   writer.begin_object();
   writer.member("model", model);
   writer.member("button_pressed", pressed);
+  writer.member("serial_stream", int64_t(serial_stream));
   writer.member("loaded", int64_t(loaded));
   writer.member("selected", int64_t(selected));
   writer.member("last_hold_ms", int64_t(last_hold_ms));

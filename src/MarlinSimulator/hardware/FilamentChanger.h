@@ -16,6 +16,7 @@
 //
 
 #include <array>
+#include <memory>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -24,12 +25,16 @@
 
 #include "../virtual_printer.h"
 #include "KinematicSystem.h"
+#include "FauxSerial.h"
 
 class FilamentChanger : public VirtualPrinter::Component {
 public:
   static constexpr size_t max_slots = 8;
 
   FilamentChanger(const char* model, size_t slot_count);
+
+  // Run the changer as a Prusa MMU2: a faux serial device on the stream Marlin uses for the MMU
+  void attach_mmu2(const int stream);
 
   // Called from the kinematic update with the nozzle position in Marlin's frame
   static void observe(const glm::vec3& marlin_position);
@@ -42,6 +47,7 @@ public:
   bool apply(const agent::JsonValue& body, std::string& error) override;
 
 private:
+  friend class Mmu2Device;
   static FilamentChanger* instance;
 
   enum class Phase { Ready, AwaitUnload, AwaitLoad };
@@ -49,10 +55,15 @@ private:
   void button_changed(const bool pressed, const uint64_t now_ns);
   void process_hold(const uint32_t hold_ms);
   void log_event(const std::string& text);
+  void note(const std::string& text);          // log_event() from another thread
+  void mmu_set_loaded(const int tool);
   void select(const int tool, const bool unload_only = false);
   glm::vec3 current_color() const;
 
   std::string model;
+  std::unique_ptr<FauxSerialDevice> serial_device;   // The MMU, when it is on a serial port
+  int serial_stream = -1;
+  int command_ms = 1500;    // How long the MMU takes to load or unload
   size_t slot_count;
   mutable std::mutex mutex;
   std::array<glm::vec3, max_slots> slot_color {};

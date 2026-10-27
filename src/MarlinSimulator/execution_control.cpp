@@ -9,6 +9,7 @@
 #include "agent/agent_interface.h"
 #include "agent/serial_log.h"
 #include "agent/host_print.h"
+#include "hardware/FauxSerial.h"
 
 extern RawSocketSerial net_serial;
 extern MSerialT serial_stream_0;
@@ -59,6 +60,7 @@ bool Kernel::execute_loop(uint64_t max_end_ticks) {
       auto count = serial_stream_0.transmit_buffer.read(serial_tx, std::size(serial_tx));
       terminal_0->serial_buffer.in.write(serial_tx, count);
       agent::serial_log.append(0, serial_tx, count);
+      FauxSerialDevice::from_marlin(0, serial_tx, count);
     }
     terminal_0->serial_buffer.out.read(serial_stream_0.receive_buffer);
   }
@@ -69,6 +71,7 @@ bool Kernel::execute_loop(uint64_t max_end_ticks) {
       auto count = serial_stream_1.transmit_buffer.read(serial_tx, std::size(serial_tx));
       terminal_1->serial_buffer.in.write(serial_tx, count);
       agent::serial_log.append(1, serial_tx, count);
+      FauxSerialDevice::from_marlin(1, serial_tx, count);
     }
     terminal_1->serial_buffer.out.read(serial_stream_1.receive_buffer);
   }
@@ -79,6 +82,7 @@ bool Kernel::execute_loop(uint64_t max_end_ticks) {
       auto count = serial_stream_2.transmit_buffer.read(serial_tx, std::size(serial_tx));
       terminal_2->serial_buffer.in.write(serial_tx, count);
       agent::serial_log.append(2, serial_tx, count);
+      FauxSerialDevice::from_marlin(2, serial_tx, count);
     }
     terminal_2->serial_buffer.out.read(serial_stream_2.receive_buffer);
   }
@@ -89,6 +93,7 @@ bool Kernel::execute_loop(uint64_t max_end_ticks) {
       auto count = serial_stream_3.transmit_buffer.read(serial_tx, std::size(serial_tx));
       terminal_3->serial_buffer.in.write(serial_tx, count);
       agent::serial_log.append(3, serial_tx, count);
+      FauxSerialDevice::from_marlin(3, serial_tx, count);
       {
         std::scoped_lock buffer_lock(net_serial.buffer_mutex);
         net_serial.tx_buffer.write(serial_tx, count);
@@ -96,6 +101,8 @@ bool Kernel::execute_loop(uint64_t max_end_ticks) {
     }
     terminal_3->serial_buffer.out.read(serial_stream_3.receive_buffer);
   }
+
+  FauxSerialDevice::service();   // Replies from simulated serial peripherals
 
   if (net_serial.available()) {
     static char buffer[1024];

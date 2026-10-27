@@ -367,6 +367,8 @@ void VirtualPrinter::build() {
 
   #if HAS_CHAMELEON
     root->add_component<FilamentChanger>("Filament Changer", "3D Chameleon Mk4", size_t(EXTRUDERS));
+  #elif HAS_PRUSA_MMU2 && defined(MMU_SERIAL_PORT)
+    root->add_component<FilamentChanger>("Filament Changer", "Prusa MMU2", size_t(EXTRUDERS))->attach_mmu2(MMU_SERIAL_PORT);
   #endif
 
   #if ENABLED(FILAMENT_RUNOUT_SENSOR)
