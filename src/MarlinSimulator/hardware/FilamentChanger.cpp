@@ -23,6 +23,10 @@ public:
   Mmu2Device(FilamentChanger& changer, const int stream) : FauxSerialDevice(stream), changer(changer) {}
 
 protected:
+  void set_sensor(const bool present) {
+    if (auto sensor = VirtualPrinter::get_component<FilamentRunoutSensor>("Filament Runout Sensor 1")) sensor->set_filament_present(present);
+  }
+
   void on_line(const std::string& line) override {
     if (line.empty()) return;
     const char c = line[0];
@@ -33,13 +37,17 @@ protected:
     else if (line == "P0") { std::scoped_lock lock(changer.mutex); reply(std::string(changer.loaded >= 0 ? "1" : "0") + "ok\n"); }
     else if (c == 'T' || c == 'L') {
       changer.note("MMU <= " + line);
-      reply("ok\n", changer.command_ms, [this, arg]{ changer.mmu_set_loaded(arg); });
+      reply("ok\n", changer.command_ms, [this, arg]{ changer.mmu_set_loaded(arg); set_sensor(false); });   // At the MMU's FINDA, not yet at the extruder
     }
     else if (c == 'U' || c == 'E') {
       changer.note("MMU <= " + line);
-      reply("ok\n", changer.command_ms, [this]{ changer.mmu_set_loaded(-1); });
+      reply("ok\n", changer.command_ms, [this]{ changer.mmu_set_loaded(-1); set_sensor(false); });
     }
-    else if (c == 'C' || c == 'R') reply("ok\n", changer.command_ms);
+    else if (line == "C0") {   // Feed to the extruder, where the printer's filament sensor (MMU2S) sees it
+      changer.note("MMU <= C0");
+      reply("ok\n", changer.command_ms, [this]{ if (changer.feed_ok) set_sensor(true); });
+    }
+    else if (c == 'R') reply("ok\n", changer.command_ms);
     else if (c == 'F' || c == 'M') reply("ok\n");
     // 'A' (abort) has no reply
   }
@@ -94,7 +102,7 @@ protected:
       const Phase& phase = phases[phase_index];
       const uint64_t elapsed_ms = Kernel::TimeControl::ticksToNanos(now - phase_start) / Kernel::TimeControl::ONE_MILLION;
       if (phase.action == Action::WaitSensor) {
-        if (elapsed_ms >= phase.ms) set_sensor(true);                       // The filament arrives at the sensor
+        if (elapsed_ms >= phase.ms && changer.feed_ok) set_sensor(true);                       // The filament arrives at the sensor
         if (!(fsensor_reported && elapsed_ms >= phase.ms) && elapsed_ms < 15000) return;   // Wait for the printer to see it
       }
       else if (elapsed_ms < phase.ms) return;
@@ -401,7 +409,11 @@ void FilamentChanger::ui_widget() {
     if (i + 1 < slot_count) ImGui::SameLine(0, 12);
   }
   ImGui::SeparatorText("Timing");
-  if (serial_device) ImGui::InputInt("MMU command time (ms)", &command_ms, 100, 1000);
+  if (serial_device) {
+    ImGui::InputInt("MMU command time (ms)", &command_ms, 100, 1000);
+    bool ok = feed_ok.load();
+    if (ImGui::Checkbox("Filament reaches the extruder", &ok)) feed_ok = ok;
+  }
   else {
     ImGui::InputInt("Pulse (ms)", &pulse_ms, 10, 100);
     ImGui::InputInt("Min feed press (ms)", &min_feed_ms, 100, 1000);
@@ -423,6 +435,7 @@ void FilamentChanger::serialize(agent::JsonWriter& writer) const {
   writer.member("model", model);
   writer.member("button_pressed", pressed);
   writer.member("serial_stream", int64_t(serial_stream));
+  writer.member("feed_ok", feed_ok.load());
   writer.member("loaded", int64_t(loaded));
   writer.member("selected", int64_t(selected));
   writer.member("last_hold_ms", int64_t(last_hold_ms));
@@ -441,6 +454,8 @@ void FilamentChanger::serialize(agent::JsonWriter& writer) const {
 
 // {"slot": 1, "color": "#ff8800"} sets the color of a filament
 bool FilamentChanger::apply(const agent::JsonValue& body, std::string& error) {
+  bool feed;
+  if (body.get_bool("feed_ok", feed)) { feed_ok = feed; return true; }   // {"feed_ok": false} jams the filament feed
   double slot;
   std::string hex;
   if (!body.get_double("slot", slot) || !body.get_string("color", hex)) {

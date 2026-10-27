@@ -16,6 +16,7 @@
 //
 
 #include <array>
+#include <atomic>
 #include <memory>
 #include <deque>
 #include <mutex>
@@ -67,6 +68,7 @@ private:
   std::string model;
   std::unique_ptr<FauxSerialDevice> serial_device;   // The MMU, when it is on a serial port
   int serial_stream = -1;
+  std::atomic_bool feed_ok { true };   // Turn off to jam: the filament never reaches the printer's filament sensor
   int command_ms = 1500;    // How long the MMU takes to load or unload
   size_t slot_count;
   mutable std::mutex mutex;
