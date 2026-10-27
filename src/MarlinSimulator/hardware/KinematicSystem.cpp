@@ -7,6 +7,7 @@
 
 #include <src/inc/MarlinConfig.h>
 #include "../scara_frame.h"
+#include "FilamentChanger.h"
 #include <src/module/motion.h> // motion.hotend_offset
 #if HAS_BED_PROBE
   #include <src/module/probe.h> // probe.offset (M851)
@@ -103,6 +104,13 @@ enum AxisIndex {
   #endif
   COUNT
 };
+
+// Let the filament changer see the button axis and color the extrusion, then tell the visualisation
+void KinematicSystem::notify_update() {
+  FilamentChanger::observe(state.position - world_from_native);
+  FilamentChanger::apply_colors(state);
+  on_kinematic_update(state);
+}
 
 void KinematicSystem::serialize(agent::JsonWriter& writer) const {
   // Ground truth: the simulated effector position derived from actual stepper
@@ -302,7 +310,7 @@ void CartesianKinematicSystem::kinematic_update() {
 #endif
 
   state.position = state.effector_position[0].position;
-  on_kinematic_update(state);
+  notify_update();
 }
 
 void CartesianKinematicSystem::ui_widget() {
@@ -370,7 +378,7 @@ void CoreXYKinematicSystem::kinematic_update() {
   }
 
   state.position = state.effector_position[0].position;
-  on_kinematic_update(state);
+  notify_update();
 }
 
 void CoreXYKinematicSystem::ui_widget() {
@@ -429,7 +437,7 @@ void CoreXZKinematicSystem::kinematic_update() {
   }
 
   state.position = state.effector_position[0].position;
-  on_kinematic_update(state);
+  notify_update();
 }
 
 void CoreXZKinematicSystem::ui_widget() {
@@ -487,7 +495,7 @@ void CoreYZKinematicSystem::kinematic_update() {
   }
 
   state.position = state.effector_position[0].position;
-  on_kinematic_update(state);
+  notify_update();
 }
 
 void CoreYZKinematicSystem::ui_widget() {
@@ -545,7 +553,7 @@ void CoreYXKinematicSystem::kinematic_update() {
   }
 
   state.position = state.effector_position[0].position;
-  on_kinematic_update(state);
+  notify_update();
 }
 
 void CoreYXKinematicSystem::ui_widget() {
@@ -603,7 +611,7 @@ void CoreZXKinematicSystem::kinematic_update() {
   }
 
   state.position = state.effector_position[0].position;
-  on_kinematic_update(state);
+  notify_update();
 }
 
 void CoreZXKinematicSystem::ui_widget() {
@@ -661,7 +669,7 @@ void CoreZYKinematicSystem::kinematic_update() {
   }
 
   state.position = state.effector_position[0].position;
-  on_kinematic_update(state);
+  notify_update();
 }
 
 void CoreZYKinematicSystem::ui_widget() {
@@ -815,7 +823,7 @@ void DeltaKinematicSystem::kinematic_update() {
 #endif
 
   state.position = state.effector_position[0].position;
-  on_kinematic_update(state);
+  notify_update();
 }
 
 void DeltaKinematicSystem::ui_widget() {
@@ -914,7 +922,7 @@ void ScaraKinematicSystem::kinematic_update() {
   #endif
 
   state.position = state.effector_position[0].position;
-  on_kinematic_update(state);
+  notify_update();
 }
 
 void ScaraKinematicSystem::ui_widget() {

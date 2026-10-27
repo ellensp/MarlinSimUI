@@ -36,6 +36,7 @@ public:
 
   virtual void kinematic_update() = 0;
   void collect_steppers();
+  void notify_update();
   virtual void serialize(agent::JsonWriter& writer) const override;
 
   // Added to a native (Marlin) position to get the simulator's world position, for kinematics whose world is not

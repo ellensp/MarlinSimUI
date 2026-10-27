@@ -13,6 +13,7 @@
 #include "hardware/SDCard.h"
 #include "hardware/W25QxxDevice.h"
 #include "hardware/FilamentRunoutSensor.h"
+#include "hardware/FilamentChanger.h"
 #include "hardware/NeoPixelDevice.h"
 #include "hardware/KinematicSystem.h"
 #include "hardware/pwm_reader.h"
@@ -361,6 +362,10 @@ void VirtualPrinter::build() {
 
   #if TEMP_SENSOR_CHAMBER
     root->add_component<Heater>("Chamber Heater", HEATER_CHAMBER_PIN, TEMP_CHAMBER_PIN, heater_data{12, 1.2}, hotend_data{325, 824, 0.897}, adc_data{4700, 12});
+  #endif
+
+  #if HAS_CHAMELEON
+    root->add_component<FilamentChanger>("Filament Changer", "3D Chameleon Mk4", size_t(EXTRUDERS));
   #endif
 
   #if ENABLED(FILAMENT_RUNOUT_SENSOR)
