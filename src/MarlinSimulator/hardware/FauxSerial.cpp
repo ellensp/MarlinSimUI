@@ -75,5 +75,5 @@ void FauxSerialDevice::from_marlin(const int stream, const uint8_t* data, const 
 void FauxSerialDevice::service() {
   std::vector<FauxSerialDevice*> devices;
   { std::scoped_lock lock(registry_mutex); devices = registry; }
-  for (auto device : devices) device->deliver_due();
+  for (auto device : devices) { device->update(); device->deliver_due(); }
 }

@@ -36,6 +36,9 @@ public:
   // Run the changer as a Prusa MMU2: a faux serial device on the stream Marlin uses for the MMU
   void attach_mmu2(const int stream);
 
+  // Run the changer as a Prusa MMU3 (framed, CRC-checked protocol; works with the printer's filament sensor)
+  void attach_mmu3(const int stream);
+
   // Called from the kinematic update with the nozzle position in Marlin's frame
   static void observe(const glm::vec3& marlin_position);
 
@@ -48,6 +51,7 @@ public:
 
 private:
   friend class Mmu2Device;
+  friend class Mmu3Device;
   static FilamentChanger* instance;
 
   enum class Phase { Ready, AwaitUnload, AwaitLoad };

@@ -39,6 +39,9 @@ protected:
   // Marlin sent these bytes. The default splits lines and calls on_line().
   virtual void on_bytes(const uint8_t* data, const size_t count);
 
+  // Called every execution loop before replies are delivered. For devices that do work over time.
+  virtual void update() {}
+
   // Marlin sent a complete line (without the line ending)
   virtual void on_line(const std::string& line) { (void)line; }
 

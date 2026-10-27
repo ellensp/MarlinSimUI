@@ -33,6 +33,10 @@ public:
       Gpio::set_pin_value(runout_pin, motion_sensor ? motion_level() : (filament_present ? !runtout_trigger_value : runtout_trigger_value));
   }
 
+  // Set by a simulated device that moves the filament (e.g. a filament changer)
+  void set_filament_present(const bool present) { filament_present = present; }
+  bool is_filament_present() const { return filament_present.load(); }
+
   void ui_widget() {
     bool value_check = filament_present.load();
     ImGui::Checkbox("Filament Present ", &value_check);

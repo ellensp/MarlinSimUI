@@ -6,6 +6,7 @@
 
 #include "FilamentChanger.h"
 #include "../agent/json.h"
+#include "FilamentRunoutSensor.h"
 #include "../execution_control.h"
 
 #include <src/inc/MarlinConfig.h>
@@ -46,6 +47,201 @@ protected:
 private:
   FilamentChanger& changer;
 };
+
+
+#if HAS_PRUSA_MMU3
+
+#include <map>
+#include <vector>
+#include <src/feature/mmu3/mmu3_protocol.h>
+
+//
+// The Prusa MMU3 as Marlin's mmu3 code sees it. Requests are decoded and responses encoded
+// with Marlin's own Protocol class, so the framing and CRCs are exactly what the MMU firmware makes.
+//
+// A command (T, L, U, E, K, ...) is accepted at once, then reports progress codes to Q0 queries over
+// time and finally "Finished". The MMU works together with the printer's filament sensor: while
+// feeding to the sensor the filament arrives, the printer sees it and tells the MMU with "f1",
+// and only then does the MMU go on to finish. The simulated filament runout sensor follows the filament.
+//
+class Mmu3Device : public FauxSerialDevice {
+  using Code = modules::protocol::RequestMsgCodes;
+  using Param = modules::protocol::ResponseMsgParamCodes;
+  using RequestMsg = modules::protocol::RequestMsg;
+  using Protocol = modules::protocol::Protocol;
+  using DecodeStatus = modules::protocol::DecodeStatus;
+  using ResponseCommandStatus = modules::protocol::ResponseCommandStatus;
+  using Progress = uint8_t;
+
+public:
+  Mmu3Device(FilamentChanger& changer, const int stream) : FauxSerialDevice(stream), changer(changer) {}
+
+protected:
+  void on_bytes(const uint8_t* data, const size_t count) override {
+    for (size_t i = 0; i < count; ++i) {
+      if (protocol.DecodeRequest(data[i]) == DecodeStatus::MessageCompleted) {
+        const RequestMsg rq = protocol.GetRequestMsg();
+        if (rq.code != Code::unknown) handle(rq);
+      }
+    }
+  }
+
+  void update() override {
+    if (!sensor_initialized) { set_sensor(false); sensor_initialized = true; }
+    if (!busy) return;
+    const uint64_t now = Kernel::TimeControl::getTicks();
+    while (busy) {
+      const Phase& phase = phases[phase_index];
+      const uint64_t elapsed_ms = Kernel::TimeControl::ticksToNanos(now - phase_start) / Kernel::TimeControl::ONE_MILLION;
+      if (phase.action == Action::WaitSensor) {
+        if (elapsed_ms >= phase.ms) set_sensor(true);                       // The filament arrives at the sensor
+        if (!(fsensor_reported && elapsed_ms >= phase.ms) && elapsed_ms < 15000) return;   // Wait for the printer to see it
+      }
+      else if (elapsed_ms < phase.ms) return;
+      switch (phase.action) {
+        case Action::ClearSensor: set_sensor(false); break;
+        case Action::SetLoaded:   changer.mmu_set_loaded(phase.arg); break;
+        case Action::ClearLoaded: changer.mmu_set_loaded(-1); break;
+        default: break;
+      }
+      phase_start += Kernel::TimeControl::nanosToTicks(uint64_t(phase.ms) * Kernel::TimeControl::ONE_MILLION);
+      if (phase.action == Action::WaitSensor) phase_start = now;
+      if (++phase_index >= phases.size()) busy = false;
+    }
+  }
+
+private:
+  enum class Action : uint8_t { None, ClearSensor, WaitSensor, SetLoaded, ClearLoaded };
+  struct Phase { Progress code; uint32_t ms; Action action; int arg; };
+
+  void send(const uint8_t* buffer, const uint8_t length) { reply(std::string((const char*)buffer, length), 2); }
+
+  void set_sensor(const bool present) {
+    if (auto sensor = VirtualPrinter::get_component<FilamentRunoutSensor>("Filament Runout Sensor 1")) sensor->set_filament_present(present);
+  }
+
+  uint16_t register_value(const uint8_t address) {
+    switch (address) {
+      case 0x00: return 3;      // Firmware 3.0.2
+      case 0x02: return 2;
+      case 0x03: return 1000;   // Build number
+      case 0x05: return busy ? phases[phase_index].code : 0;
+      case 0x07: return changer.loaded >= 0 ? 1 : 0;   // Filament state
+      case 0x08: return changer.loaded >= 0 ? 1 : 0;   // FINDA
+      case 0x09: return fsensor_reported;
+      case 0x1B: case 0x1C: return changer.loaded >= 0 ? uint16_t(changer.loaded) : 5;
+    }
+    auto it = registers.find(address);
+    return it != registers.end() ? it->second : 0;
+  }
+
+  void start_command(const RequestMsg& rq) {
+    std::scoped_lock lock(changer.mutex);
+    phases.clear();
+    const int tool = rq.value;
+    const int loaded = changer.loaded;
+    using P = Phase;
+    switch (rq.code) {
+      case Code::Tool:
+        if (loaded >= 0 && loaded != tool) {
+          phases.push_back(P{ 3, 1500, Action::ClearSensor, 0 });    // Unloading to FINDA (the printer helps)
+          phases.push_back(P{ 4, 600, Action::ClearLoaded, 0 });     // Unloading to pulley
+        }
+        if (loaded != tool) {
+          phases.push_back(P{ 18, 700, Action::None, 0 });           // Selecting filament slot
+          phases.push_back(P{ 5, 1200, Action::None, 0 });           // Feeding to FINDA
+          phases.push_back(P{ 28, 1000, Action::WaitSensor, 0 });    // Feeding to the printer's filament sensor
+          phases.push_back(P{ 7, 800, Action::SetLoaded, tool });    // Feeding to nozzle
+        }
+        phases.push_back(P{ 9, 300, Action::None, 0 });              // Finishing moves
+        break;
+      case Code::Load:
+        phases.push_back(P{ 18, 700, Action::None, 0 });
+        phases.push_back(P{ 17, 1200, Action::None, 0 });
+        break;
+      case Code::Unload:
+        phases.push_back(P{ 3, 1500, Action::ClearSensor, 0 });
+        phases.push_back(P{ 4, 600, Action::ClearLoaded, 0 });
+        phases.push_back(P{ 2, 300, Action::None, 0 });
+        break;
+      case Code::Eject:
+        phases.push_back(P{ 24, 1500, Action::ClearSensor, 0 });
+        phases.push_back(P{ 2, 300, Action::ClearLoaded, 0 });
+        break;
+      case Code::Cut:
+        phases.push_back(P{ 18, 700, Action::None, 0 });
+        phases.push_back(P{ 21, 1000, Action::None, 0 });
+        break;
+      case Code::Home:
+        phases.push_back(P{ 26, 1000, Action::None, 0 });
+        break;
+      default: break;   // Mode, Reset, ...: finished at once
+    }
+    running = rq;
+    phase_index = 0;
+    phase_start = Kernel::TimeControl::getTicks();
+    busy = !phases.empty();
+    changer.log_event(std::string("MMU3 <= ") + char(rq.code) + std::to_string(rq.value));
+  }
+
+  void handle(const RequestMsg& rq) {
+    uint8_t buffer[Protocol::MaxResponseSize()];
+    uint8_t length = 0;
+    switch (rq.code) {
+      case Code::Version:
+        length = Protocol::EncodeResponseRead(rq, true, rq.value == 0 ? 3 : rq.value == 1 ? 0 : rq.value == 2 ? 2 : 1000, buffer);
+        break;
+      case Code::Write:
+        registers[rq.value] = rq.value2;
+        length = Protocol::EncodeResponseCmdAR(rq, Param::Accepted, buffer);
+        break;
+      case Code::Read:
+        length = Protocol::EncodeResponseRead(rq, true, register_value(rq.value), buffer);
+        break;
+      case Code::FilamentSensor:
+        fsensor_reported = rq.value;
+        length = Protocol::EncodeResponseCmdAR(rq, Param::Accepted, buffer);
+        break;
+      case Code::Finda:
+        length = Protocol::EncodeResponseReadFINDA(rq, changer.loaded >= 0 ? 1 : 0, buffer);
+        break;
+      case Code::Query: {
+        const ResponseCommandStatus status = busy ? ResponseCommandStatus(Param::Processing, phases[phase_index].code) : ResponseCommandStatus(Param::Finished, 0);
+        length = Protocol::EncodeResponseQueryOperation(running, status, buffer);
+      } break;
+      case Code::Button:
+        length = Protocol::EncodeResponseCmdAR(rq, Param::Accepted, buffer);
+        break;
+      case Code::Tool: case Code::Load: case Code::Unload: case Code::Eject: case Code::Cut:
+      case Code::Mode: case Code::Reset: case Code::Home:
+        start_command(rq);
+        length = Protocol::EncodeResponseCmdAR(rq, Param::Accepted, buffer);
+        break;
+      default:
+        length = Protocol::EncodeResponseCmdAR(rq, Param::Rejected, buffer);
+        break;
+    }
+    if (length) send(buffer, length);
+  }
+
+  FilamentChanger& changer;
+  Protocol protocol;
+  RequestMsg running { Code::Reset, 0 };   // The latest command, which Q0 reports on
+  std::vector<Phase> phases;
+  size_t phase_index = 0;
+  uint64_t phase_start = 0;
+  bool busy = false;
+  bool sensor_initialized = false;
+  uint8_t fsensor_reported = 0;            // What the printer last told the MMU about its filament sensor
+  std::map<uint8_t, uint16_t> registers;   // Values the printer wrote
+};
+
+void FilamentChanger::attach_mmu3(const int stream) {
+  serial_stream = stream;
+  serial_device = std::make_unique<Mmu3Device>(*this, stream);
+}
+
+#endif // HAS_PRUSA_MMU3
 
 void FilamentChanger::note(const std::string& text) {
   std::scoped_lock lock(mutex);

@@ -58,6 +58,13 @@ struct HalSerial {
     return transmit_buffer.write(c);
   }
 
+  // Write a buffer, as Arduino's Print does. (Used by the MMU3 driver.)
+  size_t write(const uint8_t* buffer, size_t size) {
+    size_t count = 0;
+    while (size--) count += write(char(*buffer++));
+    return count;
+  }
+
   bool connected() { return host_connected; }
   operator bool() {return connected();}
 
