@@ -14,6 +14,7 @@
 #include "agent/serial_log.h"
 #include "machine_model.h"
 #include "thermal_fault_blink.h"
+#include "webcam.h"
 
 RawSocketSerial net_serial{};
 
@@ -67,6 +68,7 @@ void simulation_main() {
 struct CommandLineOptions {
   uint16_t serial_port = 8099;  // historical default for the raw G-code socket
   uint16_t agent_port  = 0;     // 0 = agent interface disabled
+  uint16_t webcam_port = 0;     // 0 = webcam off at start (the Viewport menu can turn it on)
   bool audio_enabled   = true;
 };
 
@@ -76,6 +78,8 @@ static void print_usage(const char* argv0) {
   printf("                      (also settable via MARLIN_SIM_SERIAL_PORT)\n");
   printf("  --agent-port <n>    Enable the HTTP agent control interface on 127.0.0.1:<n>\n");
   printf("                      (also settable via MARLIN_SIM_AGENT_PORT)\n");
+  printf("  --webcam-port <n>   Serve the Viewport as a webcam on port <n> (snapshot and MJPEG stream)\n");
+  printf("                      (also settable via MARLIN_SIM_WEBCAM_PORT). Off by default; the Viewport menu uses the serial port + 2\n");
   printf("  --no-audio          Disable audio/buzzer emulation\n");
   printf("  --machine <type>    Printer model in the Viewport: bedslinger, cube, delta, scara, belt\n");
   printf("                      (default: from the Marlin configuration; DELTA, SCARA and BELTPRINTER builds allow only their own)\n");
@@ -95,6 +99,7 @@ static bool parse_command_line(int argc, char** argv, CommandLineOptions& option
   };
   env_port("MARLIN_SIM_SERIAL_PORT", options.serial_port);
   env_port("MARLIN_SIM_AGENT_PORT", options.agent_port);
+  env_port("MARLIN_SIM_WEBCAM_PORT", options.webcam_port);
 
   for (int i = 1; i < argc; ++i) {
     const char* arg = argv[i];
@@ -118,6 +123,9 @@ static bool parse_command_line(int argc, char** argv, CommandLineOptions& option
     }
     else if (strcmp(arg, "--agent-port") == 0) {
       if (!next_port(options.agent_port)) return false;
+    }
+    else if (strcmp(arg, "--webcam-port") == 0) {
+      if (!next_port(options.webcam_port)) return false;
     }
     else if (strcmp(arg, "--no-audio") == 0) {
       options.audio_enabled = false;
@@ -179,6 +187,9 @@ int main(int argc, char** argv) {
     agent::server.start(options.agent_port);  // non-fatal on failure
   }
 
+  webcam::set_default_port(uint16_t(options.serial_port + 2));
+  if (options.webcam_port) webcam::enable(options.webcam_port);  // non-fatal on failure
+
   Application app;
   std::thread simulation_loop(simulation_main);
 
@@ -192,6 +203,7 @@ int main(int argc, char** argv) {
   Kernel::quit_requested = true;
   simulation_loop.join();
   agent::server.stop();
+  webcam::shutdown();
   net_serial.stop();
 
   SDLNet_Quit();

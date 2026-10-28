@@ -1,4 +1,5 @@
 #include "visualisation.h"
+#include "webcam.h"
 
 #include <glm/vec3.hpp>          // https://glm.g-truc.net/
 #include <glm/vec4.hpp>
@@ -755,6 +756,22 @@ void Visualisation::ui_viewport_menu_callback(UiWindow*) {
         }
         ImGui::EndMenu();
       }
+      ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Webcam")) {
+      bool on = webcam::enabled();
+      if (ImGui::MenuItem("Serve Viewport as Webcam", nullptr, &on)) {
+        if (on) webcam::enable(); else webcam::disable();
+      }
+      if (webcam::enabled()) {
+        char url[64];
+        snprintf(url, sizeof(url), "Stream:   http://localhost:%u/stream", unsigned(webcam::port()));
+        ImGui::TextUnformatted(url);
+        snprintf(url, sizeof(url), "Snapshot: http://localhost:%u/snapshot", unsigned(webcam::port()));
+        ImGui::TextUnformatted(url);
+        ImGui::Text("Clients: %u", unsigned(webcam::client_count()));
+      }
+      else ImGui::TextDisabled("Off. Hosts such as OctoPrint can show it as a webcam.");
       ImGui::EndMenu();
     }
     ImGui::EndMenuBar();

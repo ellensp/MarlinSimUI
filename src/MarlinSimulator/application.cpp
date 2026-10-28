@@ -10,6 +10,7 @@
 #include "agent/agent_interface.h"
 #include "agent/request_log.h"
 #include "view_control.h"
+#include "webcam.h"
 
 #include "../HAL.h"
 #include <src/MarlinCore.h>
@@ -391,6 +392,13 @@ void Application::render() {
     if (!sim.vis.framebuffer->read_rgb(capture.rgb, w, h)) w = h = 0;
     capture.width = w; capture.height = h;
     request->set_value(std::move(capture));
+  }
+
+  // Webcam frame (only while a host is asking for one), read here on the GL thread
+  if (webcam::wants_frame()) {
+    std::vector<uint8_t> rgb;
+    GLuint w = 0, h = 0;
+    if (sim.vis.framebuffer->read_rgb(rgb, w, h)) webcam::submit_frame(std::move(rgb), w, h);
   }
 
   user_interface.render();

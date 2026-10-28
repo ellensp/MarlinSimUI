@@ -40,6 +40,7 @@
       "-Ivendor/ImGuiFileDialog-0.6.7",
       "-Ivendor/vcd-writer-b4fe347/include",
       "-Ivendor/glad/include",
+      "-Ivendor/stb-image-write-1.16",
       "-DIMGUI_IMPL_OPENGL_LOADER_GLAD"
     ]
   },

@@ -137,6 +137,23 @@ your configuration (bed size, Z height, delta geometry).
   (`{"preset":"iso"}`, `{"yaw":30,"pitch":20,"distance":400}`, `{"machine":"cube"}`,
   `{"markings":false}`).
 
+### Webcam
+
+The Viewport can act as a printer webcam, so a host such as OctoPrint or Mainsail can show it. It is
+off by default. Turn it on from the Viewport's **Webcam** menu, or start the simulator with
+`--webcam-port <n>` (or `MARLIN_SIM_WEBCAM_PORT`). The Viewport menu uses the serial port + 2 (8101 for the default
+8099), so two simulators started with different `--serial-port` values never collide.
+
+| URL | Serves |
+| --- | --- |
+| `http://<host>:<port>/stream` | MJPEG stream, up to 5 frames per second |
+| `http://<host>:<port>/snapshot` | One JPEG |
+
+`/?action=stream` and `/?action=snapshot` work too, since hosts default to that form. Frames are only
+read back and encoded while a client is asking for them, and only while the Viewport is visible.
+Unlike the agent interface, the webcam listens on all interfaces, so a host in a Docker container can
+reach it as `host.docker.internal`. It only serves images and can't send G-code or change anything.
+
 ### Other improvements
 
 - The window opens maximized.
