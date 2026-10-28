@@ -69,6 +69,9 @@ private:
   std::unique_ptr<FauxSerialDevice> serial_device;   // The MMU, when it is on a serial port
   int serial_stream = -1;
   std::atomic_bool feed_ok { true };   // Turn off to jam: the filament never reaches the printer's filament sensor
+  std::atomic<int> inject_error { 0 };       // MMU3: raise this error code (e.g. 0x8003) in the running command
+  std::atomic<int> press_mmu_button { -1 };  // MMU3: report a press of the MMU's own button (0 right, 1 middle, 2 left)
+  std::atomic<int> mmu_error { 0 };          // MMU3: the error the MMU is holding at until a button is pressed (0 for none)
   int command_ms = 1500;    // How long the MMU takes to load or unload
   size_t slot_count;
   mutable std::mutex mutex;
@@ -86,4 +89,6 @@ private:
   int min_feed_ms = 3000;   // A load or unload press must hold at least this long to move the filament far enough
   std::string status = "Idle";
   std::deque<std::string> history;   // Recent button holds and what the Chameleon made of them
+  std::deque<std::string> event_log; // The latest 500 events, for tests that must not miss one
+  uint64_t event_seq = 0;            // How many events there have been in all (event_log ends here)
 };

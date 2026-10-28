@@ -96,14 +96,20 @@ protected:
 
   void update() override {
     if (!sensor_initialized) { set_sensor(false); sensor_initialized = true; }
-    if (!busy) return;
+    if (!busy) return;                                                   // An error armed with {"mmu_error"} waits here for the next command
+    if (error_code) return;                                             // Holding in error until the printer sends a button
+    if (const int injected = changer.inject_error.exchange(0)) { raise_error(uint16_t(injected)); return; }
     const uint64_t now = Kernel::TimeControl::getTicks();
     while (busy) {
       const Phase& phase = phases[phase_index];
       const uint64_t elapsed_ms = Kernel::TimeControl::ticksToNanos(now - phase_start) / Kernel::TimeControl::ONE_MILLION;
       if (phase.action == Action::WaitSensor) {
         if (elapsed_ms >= phase.ms && changer.feed_ok) set_sensor(true);                       // The filament arrives at the sensor
-        if (!(fsensor_reported && elapsed_ms >= phase.ms) && elapsed_ms < 15000) return;   // Wait for the printer to see it
+        if (!(fsensor_reported && elapsed_ms >= phase.ms)) {                               // Wait for the printer to see it
+          if (elapsed_ms < 4000) return;
+          raise_error(0x8003);                                                              // FSENSOR_DIDNT_SWITCH_ON
+          return;
+        }
       }
       else if (elapsed_ms < phase.ms) return;
       switch (phase.action) {
@@ -123,6 +129,15 @@ private:
   struct Phase { Progress code; uint32_t ms; Action action; int arg; };
 
   void send(const uint8_t* buffer, const uint8_t length) { reply(std::string((const char*)buffer, length), 2); }
+
+  // The MMU reports an error to every Q0 query and holds there until the printer sends a button
+  void raise_error(const uint16_t code) {
+    error_code = code;
+    changer.mmu_error = code;
+    char text[32];
+    snprintf(text, sizeof(text), "MMU3 error E%04X", code);
+    changer.note(text);
+  }
 
   void set_sensor(const bool present) {
     if (auto sensor = VirtualPrinter::get_component<FilamentRunoutSensor>("Filament Runout Sensor 1")) sensor->set_filament_present(present);
@@ -214,10 +229,22 @@ private:
         length = Protocol::EncodeResponseReadFINDA(rq, changer.loaded >= 0 ? 1 : 0, buffer);
         break;
       case Code::Query: {
-        const ResponseCommandStatus status = busy ? ResponseCommandStatus(Param::Processing, phases[phase_index].code) : ResponseCommandStatus(Param::Finished, 0);
+        const int pressed = changer.press_mmu_button.exchange(-1);   // A press of the MMU's own button
+        const ResponseCommandStatus status =
+          pressed >= 0 ? ResponseCommandStatus(Param::Button, uint16_t(pressed)) :
+          error_code   ? ResponseCommandStatus(Param::Error, error_code) :
+          busy         ? ResponseCommandStatus(Param::Processing, phases[phase_index].code) :
+                         ResponseCommandStatus(Param::Finished, 0);
         length = Protocol::EncodeResponseQueryOperation(running, status, buffer);
       } break;
       case Code::Button:
+        if (error_code && rq.value == 1) {           // Middle: Retry (or Done). The failed step is attempted again.
+          error_code = 0;
+          changer.mmu_error = 0;
+          phase_start = Kernel::TimeControl::getTicks();
+          changer.note("MMU3 <= B1 (retry)");
+        }
+        else changer.note(std::string("MMU3 <= B") + std::to_string(rq.value));
         length = Protocol::EncodeResponseCmdAR(rq, Param::Accepted, buffer);
         break;
       case Code::Tool: case Code::Load: case Code::Unload: case Code::Eject: case Code::Cut:
@@ -239,6 +266,7 @@ private:
   size_t phase_index = 0;
   uint64_t phase_start = 0;
   bool busy = false;
+  uint16_t error_code = 0;                 // The error the MMU is in, until a button is pressed
   bool sensor_initialized = false;
   uint8_t fsensor_reported = 0;            // What the printer last told the MMU about its filament sensor
   std::map<uint8_t, uint16_t> registers;   // Values the printer wrote
@@ -304,6 +332,9 @@ void FilamentChanger::select(const int tool, const bool only_unload) {
 void FilamentChanger::log_event(const std::string& text) {
   history.push_back(text);
   while (history.size() > 12) history.pop_front();
+  event_log.push_back(text);
+  ++event_seq;
+  while (event_log.size() > 500) event_log.pop_front();
 }
 
 void FilamentChanger::process_hold(const uint32_t hold_ms) {
@@ -436,11 +467,17 @@ void FilamentChanger::serialize(agent::JsonWriter& writer) const {
   writer.member("button_pressed", pressed);
   writer.member("serial_stream", int64_t(serial_stream));
   writer.member("feed_ok", feed_ok.load());
+  writer.member("mmu_error", int64_t(mmu_error.load()));
   writer.member("loaded", int64_t(loaded));
   writer.member("selected", int64_t(selected));
   writer.member("last_hold_ms", int64_t(last_hold_ms));
   writer.member("axis_position", double(axis_position));
   writer.member("status", status);
+  writer.member("event_seq", int64_t(event_seq));
+  writer.key("events");
+  writer.begin_array();
+  for (auto const& e : event_log) writer.value(e);
+  writer.end_array();
   writer.key("history");
   writer.begin_array();
   for (auto const& h : history) writer.value(h);
@@ -456,6 +493,9 @@ void FilamentChanger::serialize(agent::JsonWriter& writer) const {
 bool FilamentChanger::apply(const agent::JsonValue& body, std::string& error) {
   bool feed;
   if (body.get_bool("feed_ok", feed)) { feed_ok = feed; return true; }   // {"feed_ok": false} jams the filament feed
+  double code;
+  if (body.get_double("mmu_error", code)) { inject_error = int(code); return true; }            // {"mmu_error": 32771}: arms MMU3 error E8003 for the next command (or the running one)
+  if (body.get_double("mmu_button", code)) { press_mmu_button = int(code); return true; }      // {"mmu_button": 1}: the MMU's own middle button is pressed
   double slot;
   std::string hex;
   if (!body.get_double("slot", slot) || !body.get_string("color", hex)) {
