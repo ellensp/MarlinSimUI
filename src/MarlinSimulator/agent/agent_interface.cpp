@@ -32,7 +32,7 @@ extern MSerialT serial_stream_0, serial_stream_1, serial_stream_2, serial_stream
 #include <future>
 
 
-#if ANY(TFT_INTERFACE_SPI, HAS_MARLINUI_HD44780, HAS_MARLINUI_U8GLIB)
+#if ANY(TFT_INTERFACE_SPI, TFT_INTERFACE_FSMC, HAS_MARLINUI_HD44780, HAS_MARLINUI_U8GLIB)
   #define HAS_SIM_DISPLAY 1
 #endif
 
@@ -615,7 +615,7 @@ void handle_post_touch(const Request& request, Response& response) {
   response.json(writer.str());
 }
 
-#if ENABLED(TFT_INTERFACE_SPI)
+#if ANY(TFT_INTERFACE_SPI, TFT_INTERFACE_FSMC)
 
 // POST /touch/rects — show or hide Marlin's touch control rectangles on the LCD
 //   {"show": true}   show       {"show": false}   hide       {}   toggle
@@ -646,7 +646,7 @@ void handle_post_touch_rects(const Request& request, Response& response) {
   response.json(writer.str());
 }
 
-#endif // TFT_INTERFACE_SPI
+#endif // TFT_INTERFACE_SPI || TFT_INTERFACE_FSMC
 
 #endif // TOUCH_SCREEN
 
@@ -1022,7 +1022,7 @@ void register_routes() {
     server.route("GET /displays", handle_get_displays);
     #if ENABLED(TOUCH_SCREEN)
       server.route("POST /touch", handle_post_touch);
-      #if ENABLED(TFT_INTERFACE_SPI)
+      #if ANY(TFT_INTERFACE_SPI, TFT_INTERFACE_FSMC)
         server.route("POST /touch/rects", handle_post_touch_rects);
       #endif
     #endif

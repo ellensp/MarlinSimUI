@@ -22,7 +22,8 @@
 
 #include <src/inc/MarlinConfig.h>
 
-#if HAS_SPI_TFT
+// FSMC panels use the same simulated SPI display (see HAL/NATIVE_SIM/tft/tft_fsmc.h)
+#if ANY(HAS_SPI_TFT, HAS_FSMC_TFT)
 
 #include "../../paths.h"
 #include MARLIN_HAL_PATH(tft/tft_spi.h)
@@ -161,4 +162,4 @@ void TFT_SPI::writeReg(uint16_t inReg) {
 void TFT_SPI::writeSequence(uint16_t *data, uint16_t count) { transmitDMA(DMA_MINC_ENABLE, data, count); }
 void TFT_SPI::writeMultiple(uint16_t color, uint32_t count) { static uint16_t data; data = color; transmitDMA(DMA_MINC_DISABLE, &data, count); }
 
-#endif // HAS_SPI_TFT
+#endif // HAS_SPI_TFT || HAS_FSMC_TFT
