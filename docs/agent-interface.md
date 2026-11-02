@@ -83,6 +83,8 @@ Simulation-thread requests time out with 503 after 5 s of wall-clock time.
 | `POST /serial` | direct | `{"clear":true}` / `{"max_lines":N}`. |
 | `POST /gcode` | sim | `{"command":"G1 X10"}`. One line. Never blocks. |
 | `GET /idle` | sim | `{"idle":bool, "rx_pending", "commands_queued", "blocks_queued", "planner_busy", "moves_queued"}`. |
+| `GET /pins` | sim | Every pin Marlin names (the table M43 prints) with `dir` (`in`/`out`, as the firmware set it) and `value`. Filters: `?name=<substring>`, `?pin=<n>`, `?dir=in\|out` (see 2.8). |
+| `POST /pins` | sim | `{"name":"E2_DIR_PIN"\|"pin":N, "value":0\|1}`. Drives an input pin, like the Pin List checkbox. Refuses outputs (409) (see 2.8). |
 | `GET /displays` | sim | Components that can be captured. |
 | `POST /screenshot` | sim | `{"path":"/abs/file.png"[, "display":"<name>"]}`. Writes a PNG. |
 | `POST /touch` | sim | `{"x":0..1, "y":0..1[, "hold_ms":N]}`. Taps or holds the touchscreen. |
@@ -222,6 +224,30 @@ Errors:
 
 Set up the shot first with `POST /view`. It's applied on the next frame, so it
 lands before, or in the same frame as, the capture.
+
+### 2.8 Pins and M43
+
+`GET /pins` lists the same named pins as the Pin List window and `M43`. Direction is
+what the firmware configured (`pinMode` / `SET_OUTPUT`), so `M43` and `/pins` agree.
+`POST /pins` sets an INPUT pin's level; an output belongs to the firmware, so setting
+one returns 409. Unknown `name` gives 404.
+
+Some inputs are owned by a simulated device, which overwrites what you write: the
+display component drives the encoder, Back, and Kill pins from its buttons. Those are
+also in the protected set below, so use a free input (e.g. `E2_DIR_PIN` on a
+single-extruder build) to drive `M43`.
+
+Protected pins (`M43` skips them unless given `I`) are Marlin's own sensitive pins
+(steppers, heaters, fans, temperature sensors) plus the pins the simulator hardware owns,
+listed in `Marlin/src/HAL/NATIVE_SIM/inc/Conditionals_post.h` (`HAL_SENSITIVE_PINS`):
+encoder and buttons (incl. Back), SD detect, the LCD and SD buses, and `KILL_PIN`.
+
+`M43 W` runs until `M108`, a click, or a reset. Enable `EMERGENCY_PARSER` so `M108`
+sent over a serial stream can end it; host bytes are fed to the parser by
+`HalSerial::rx_write()`.
+
+Regression test: `scripts/m43_test.py <agent-port>` in the `marlin-simui-contributor`
+skill (needs `PINS_DEBUGGING`, `EMERGENCY_PARSER`, `SERIAL_PORT_2 3`).
 
 ---
 

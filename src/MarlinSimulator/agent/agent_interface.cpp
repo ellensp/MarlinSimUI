@@ -9,6 +9,8 @@
 #include "../machine_model.h"
 
 #include "host_print.h"
+#include "pins_api.h"
+#include "../hardware/Gpio.h"
 #include "../thermal_fault_blink.h"
 #include "../hardware/fat_image.h"
 #include "../hardware/SDCard.h"
@@ -546,7 +548,7 @@ void handle_post_gcode(const Request& request, Response& response) {
   const uint64_t serial_from = serial_log.next_sequence();
 
   command += '\n';
-  serial_stream_3.receive_buffer.write((uint8_t*)command.data(), command.size());
+  serial_stream_3.rx_write((uint8_t*)command.data(), command.size());
 
   JsonWriter writer;
   writer.begin_object();
@@ -824,7 +826,7 @@ bool prepare_host_file(Request& request, Response& response) {
 // Queue a line of G-code as if typed on the agent's serial port
 void enqueue_gcode(const std::string& line) {
   const std::string command = line + "\n";
-  serial_stream_3.receive_buffer.write((uint8_t*)command.data(), command.size());
+  serial_stream_3.rx_write((uint8_t*)command.data(), command.size());
 }
 
 // POST /sd/mount -- put host files on the simulated SD card, no image prep needed.
@@ -1010,6 +1012,79 @@ void handle_post_print_control(const Request& request, Response& response) {
   response.json(writer.str());
 }
 
+// GET /pins?name=<substring>&dir=in|out&pin=<n>
+//
+// Every pin Marlin names (the same table M43 prints), with the direction the
+// firmware set and the live level. One row per name, so an aliased pin repeats.
+void handle_get_pins(const Request& request, Response& response) {
+  std::string name_filter, dir_filter, pin_filter;
+  request.query_param("name", name_filter);
+  request.query_param("dir", dir_filter);
+  const bool has_pin = request.query_param("pin", pin_filter);
+  const int pin_wanted = atoi(pin_filter.c_str());
+
+  JsonWriter writer;
+  writer.begin_object();
+  writer.key("pins");
+  writer.begin_array();
+  for (size_t i = 0; i < pin_table_size(); ++i) {
+    const PinEntry e = pin_table_at(i);
+    const bool is_out = Gpio::getDir(pin_type(e.pin)) == OUTPUT;
+    if (has_pin && e.pin != pin_wanted) continue;
+    if (!name_filter.empty() && !strcasestr(e.name, name_filter.c_str())) continue;
+    if (dir_filter == "in" && is_out) continue;
+    if (dir_filter == "out" && !is_out) continue;
+    writer.begin_object();
+    writer.member("pin", double(e.pin));
+    writer.member("name", std::string(e.name));
+    writer.member("dir", std::string(is_out ? "out" : "in"));
+    writer.member("value", double(Gpio::get_pin_value(pin_type(e.pin))));
+    writer.member("analog", !e.digital);
+    writer.end_object();
+  }
+  writer.end_array();
+  writer.end_object();
+  response.json(writer.str());
+}
+
+// POST /pins {"pin":<n> | "name":"KILL_PIN", "value":0|1}
+//
+// Drives an INPUT pin, as ticking its box in the Pin List window does. Outputs
+// belong to the firmware, so setting one is refused (409).
+void handle_post_pins(const Request& request, Response& response) {
+  JsonValue body;
+  if (!body.parse(request.body)) { response.error(400, "body is not valid JSON"); return; }
+
+  double value = 0;
+  if (!body.get_double("value", value)) { response.error(400, "'value' is required, e.g. {\"name\": \"KILL_PIN\", \"value\": 0}"); return; }
+
+  int pin = -1;
+  std::string name;
+  double num = 0;
+  if (body.get_double("pin", num)) pin = int(num);
+  else if (body.get_string("name", name)) {
+    for (size_t i = 0; i < pin_table_size() && pin < 0; ++i) {
+      const PinEntry e = pin_table_at(i);
+      if (strcasecmp(e.name, name.c_str()) == 0) pin = e.pin;
+    }
+    if (pin < 0) { response.error(404, "no pin named '" + name + "' (see GET /pins)"); return; }
+  }
+  else { response.error(400, "'pin' or 'name' is required"); return; }
+
+  if (!Gpio::valid_pin(pin_type(pin))) { response.error(400, "pin out of range"); return; }
+  if (Gpio::getDir(pin_type(pin)) == OUTPUT) { response.error(409, "pin is an output driven by the firmware"); return; }
+
+  Gpio::set(pin_type(pin), uint16_t(value));
+
+  JsonWriter writer;
+  writer.begin_object();
+  writer.member("ok", true);
+  writer.member("pin", double(pin));
+  writer.member("value", double(Gpio::get_pin_value(pin_type(pin))));
+  writer.end_object();
+  response.json(writer.str());
+}
+
 } // namespace
 
 void register_routes() {
@@ -1027,6 +1102,8 @@ void register_routes() {
   // POST /gcode never blocks, so it needs no special budget.
   server.route("POST /gcode", handle_post_gcode);
   server.route("GET /idle", handle_get_idle);
+  server.route("GET /pins", handle_get_pins);
+  server.route("POST /pins", handle_post_pins);
   // Viewport camera: mailbox to the UI thread, so it works while the sim is frozen
   server.route("GET /view", handle_get_view, Affinity::Direct);
   server.route("POST /view", handle_post_view, Affinity::Direct);
@@ -1070,7 +1147,7 @@ void register_routes() {
   // The serial host writes into Marlin's receive buffer for its port
   host_print.set_sender([](int port, const std::string& line) {
     MSerialT* streams[] = { &serial_stream_0, &serial_stream_1, &serial_stream_2, &serial_stream_3 };
-    streams[port]->receive_buffer.write((uint8_t*)line.data(), line.size());
+    streams[port]->rx_write((uint8_t*)line.data(), line.size());
   });
   host_print.set_ready([] { return marlin.isRunning() && !queue.has_commands_queued(); });
 }

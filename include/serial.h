@@ -27,6 +27,7 @@
 #endif
 #include <src/core/serial_hook.h>
 
+#include <algorithm>
 #include <cstring>
 #include <stdarg.h>
 #include <stdio.h>
@@ -65,6 +66,24 @@ struct HalSerial {
     return count;
   }
 
+  // Bytes arriving from the host. A UART's RX interrupt feeds each one to the emergency
+  // parser (M108, M410, M112, M876...) so they act even while a command is running.
+  // FauxSerial replies from simulated peripherals are NOT host input and bypass this.
+  size_t rx_write(const uint8_t* src, size_t length) {
+    length = std::min(length, receive_buffer.free());
+    #if ENABLED(EMERGENCY_PARSER)
+      for (size_t i = 0; i < length; ++i) emergency_parser.update(emergency_state, src[i]);
+    #endif
+    return receive_buffer.write(src, length);
+  }
+
+  // Move whatever the UI terminal has queued into the receive buffer as host input.
+  template<typename Ring>
+  void rx_write_from(Ring& source) {
+    uint8_t chunk[256];
+    while (size_t count = source.read(chunk, std::min(sizeof(chunk), receive_buffer.free()))) rx_write(chunk, count);
+  }
+
   bool connected() { return host_connected; }
   operator bool() {return connected();}
 
@@ -91,6 +110,9 @@ struct HalSerial {
   RingBuffer<uint8_t, receive_buffer_size> receive_buffer;
   RingBuffer<uint8_t, transmit_buffer_size> transmit_buffer;
   volatile bool host_connected;
+  #if ENABLED(EMERGENCY_PARSER)
+    EmergencyParser::State emergency_state = EmergencyParser::EP_RESET;
+  #endif
 };
 
 typedef Serial1Class<HalSerial> MSerialT;

@@ -1,4 +1,6 @@
 #include <SDL2/SDL.h>
+#include <cstring>
+#include <cctype>
 #include <imgui.h>
 #include <imgui_impl_sdl2.h>
 
@@ -9,6 +11,7 @@
 #include "virtual_printer.h"
 #include "agent/agent_interface.h"
 #include "agent/request_log.h"
+#include "agent/pins_api.h"
 #include "view_control.h"
 #include "webcam.h"
 
@@ -176,15 +179,46 @@ Application::Application() {
   });
 
   user_interface.addElement<UiWindow>("Pin List", [this](UiWindow* window){
-    for (auto p : pin_array) {
-      bool value = Gpio::get_pin_value(p.pin);
-      if (ImGui::Checkbox((std::string("##") + p.name).c_str(), &value)) {
-        Gpio::set(p.pin, value);
+    // What M43 reports, live: direction (as set by the firmware) and level.
+    // Inputs are the user's to drive; outputs belong to the firmware, so they are display-only.
+    static char filter[48] = "";
+    static bool inputs_only = false;
+    ImGui::SetNextItemWidth(160);
+    ImGui::InputTextWithHint("##PinFilter", "filter by name or pin", filter, sizeof(filter));
+    ImGui::SameLine();
+    ImGui::Checkbox("Inputs only", &inputs_only);
+    ImGui::Separator();
+
+    auto contains_nocase = [](const char *hay, const char *needle) {
+      const size_t n = strlen(needle);
+      for (; *hay; ++hay) {
+        size_t i = 0;
+        while (i < n && hay[i] && tolower((unsigned char)hay[i]) == tolower((unsigned char)needle[i])) ++i;
+        if (i == n) return true;
       }
+      return false;
+    };
+
+    int row = 0;
+    for (auto p : pin_array) {
+      const bool is_out = Gpio::getDir(p.pin) == OUTPUT;
+      if (inputs_only && is_out) continue;
+      if (filter[0]) {
+        char num[8]; snprintf(num, sizeof(num), "%d", int(p.pin));
+        if (!contains_nocase(p.name, filter) && !strstr(num, filter)) continue;
+      }
+      ImGui::PushID(row++);
+      bool value = Gpio::get_pin_value(p.pin);
+      ImGui::BeginDisabled(is_out);
+      if (ImGui::Checkbox("##v", &value)) Gpio::set(p.pin, value);
+      ImGui::EndDisabled();
+      ImGui::SameLine();
+      ImGui::TextColored(is_out ? ImVec4(1.0f, 0.65f, 0.3f, 1.0f) : ImVec4(0.55f, 0.8f, 1.0f, 1.0f), is_out ? "OUT" : "IN ");
       ImGui::SameLine();
       ImGui::Text("[%04d]", Gpio::get_pin_value(p.pin));
       ImGui::SameLine();
       ImGui::Text("%s (%d)", p.name, p.pin);
+      ImGui::PopID();
     }
   });
 
@@ -403,4 +437,9 @@ void Application::render() {
 
   user_interface.render();
   window.swap_buffers();
+}
+
+namespace agent {
+  size_t pin_table_size() { return sizeof(pin_array) / sizeof(pin_array[0]); }
+  PinEntry pin_table_at(const size_t i) { return { pin_array[i].name, int(pin_array[i].pin), bool(pin_array[i].is_digital) }; }
 }

@@ -62,7 +62,7 @@ bool Kernel::execute_loop(uint64_t max_end_ticks) {
       agent::serial_log.append(0, serial_tx, count);
       FauxSerialDevice::from_marlin(0, serial_tx, count);
     }
-    terminal_0->serial_buffer.out.read(serial_stream_0.receive_buffer);
+    serial_stream_0.rx_write_from(terminal_0->serial_buffer.out);
   }
 
   static auto terminal_1 = UserInterface::getElement<SerialMonitor>("Serial Monitor(1)");
@@ -73,7 +73,7 @@ bool Kernel::execute_loop(uint64_t max_end_ticks) {
       agent::serial_log.append(1, serial_tx, count);
       FauxSerialDevice::from_marlin(1, serial_tx, count);
     }
-    terminal_1->serial_buffer.out.read(serial_stream_1.receive_buffer);
+    serial_stream_1.rx_write_from(terminal_1->serial_buffer.out);
   }
 
   static auto terminal_2 = UserInterface::getElement<SerialMonitor>("Serial Monitor(2)");
@@ -84,7 +84,7 @@ bool Kernel::execute_loop(uint64_t max_end_ticks) {
       agent::serial_log.append(2, serial_tx, count);
       FauxSerialDevice::from_marlin(2, serial_tx, count);
     }
-    terminal_2->serial_buffer.out.read(serial_stream_2.receive_buffer);
+    serial_stream_2.rx_write_from(terminal_2->serial_buffer.out);
   }
 
   static auto terminal_3 = UserInterface::getElement<SerialMonitor>("Serial Monitor(3)");
@@ -99,7 +99,7 @@ bool Kernel::execute_loop(uint64_t max_end_ticks) {
         net_serial.tx_buffer.write(serial_tx, count);
       }
     }
-    terminal_3->serial_buffer.out.read(serial_stream_3.receive_buffer);
+    serial_stream_3.rx_write_from(terminal_3->serial_buffer.out);
   }
 
   FauxSerialDevice::service();   // Replies from simulated serial peripherals
@@ -108,7 +108,7 @@ bool Kernel::execute_loop(uint64_t max_end_ticks) {
     static char buffer[1024];
     std::scoped_lock buffer_lock(net_serial.buffer_mutex);
     auto count = net_serial.readBytes(buffer, std::size(buffer));
-    serial_stream_3.receive_buffer.write((uint8_t *)buffer, count);
+    serial_stream_3.rx_write((uint8_t *)buffer, count);
   }
 
   // Service queued agent requests on the simulation thread. execute_loop is
