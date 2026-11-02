@@ -81,7 +81,7 @@ static void print_usage(const char* argv0) {
   printf("  --webcam-port <n>   Serve the Viewport as a webcam on port <n> (snapshot and MJPEG stream)\n");
   printf("                      (also settable via MARLIN_SIM_WEBCAM_PORT). Off by default; the Viewport menu uses the serial port + 2\n");
   printf("  --no-audio          Disable audio/buzzer emulation\n");
-  printf("  --machine <type>    Printer model in the Viewport: bedslinger, cube, delta, scara, belt\n");
+  printf("  --machine <type>    Printer model in the Viewport: bedslinger, cube, delta, scara, belt, toolchanger\n");
   printf("                      (default: from the Marlin configuration; DELTA, SCARA and BELTPRINTER builds allow only their own)\n");
   printf("  --belt-angle <deg>  Belt printer gantry tilt from the belt, 1-89 (default %g)\n", MachineModel::belt_default_tilt);
   printf("  --help              Show this message\n");
@@ -132,11 +132,11 @@ static bool parse_command_line(int argc, char** argv, CommandLineOptions& option
     }
     else if (strcmp(arg, "--machine") == 0) {
       if (i + 1 >= argc || (machine_type_option = machine_type_from_name(argv[++i])) == MACHINE_TYPE_COUNT) {
-        fprintf(stderr, "--machine requires one of: bedslinger, cube, delta, scara, belt\n");
+        fprintf(stderr, "--machine requires one of: bedslinger, cube, delta, scara, belt, toolchanger\n");
         return false;
       }
       if (!MachineModel::is_available(machine_type_option)) {
-        fprintf(stderr, "--machine %s: not available for this build's kinematics (DELTA builds show only 'delta', SCARA builds only 'scara', BELTPRINTER builds only 'belt')\n", argv[i]);
+        fprintf(stderr, "--machine %s: not available for this build's kinematics (DELTA builds show only 'delta', SCARA builds only 'scara', BELTPRINTER builds only 'belt', switching-toolhead builds only 'toolchanger')\n", argv[i]);
         return false;
       }
     }

@@ -87,7 +87,7 @@ Command-line options:
 | `--agent-port <n>` | Enable the agent interface on `127.0.0.1:<n>` (or `MARLIN_SIM_AGENT_PORT`). |
 | `--serial-port <n>` | TCP port for the raw G-code socket (default 8099, or `MARLIN_SIM_SERIAL_PORT`). |
 | `--no-audio` | Disable buzzer emulation. |
-| `--machine <type>` | Viewport printer model: `bedslinger`, `cube`, `delta`, `scara` or `belt`. |
+| `--machine <type>` | Viewport printer model: `bedslinger`, `cube`, `delta`, `scara`, `belt` or `toolchanger`. |
 | `--belt-angle <deg>` | Belt printer gantry tilt from the belt, 1 to 89 degrees (default 45). |
 
 ### 3D printer models in the Viewport
@@ -96,8 +96,12 @@ The Viewport draws a whole printer that moves with the simulation, sized from
 your configuration (bed size, Z height, delta geometry).
 
 - **Bedslinger** (i3 style), **Cube** (head on top, bed moves in Z), **Delta**, **SCARA** (one arm over a Z bed)
-  and **Belt Printer** (`BELTPRINTER`: a cube frame without bottom or back, tilted over two rollers and a belt).
-  DELTA builds show the Delta, SCARA builds the SCARA, BELTPRINTER builds the Belt Printer; other builds offer the Bedslinger and the Cube.
+  **Belt Printer** (`BELTPRINTER`: a cube frame without bottom or back, tilted over two rollers and a belt)
+  and **Toolchanger** (`SWITCHING_TOOLHEAD`, `MAGNETIC_SWITCHING_TOOLHEAD` or `ELECTROMAGNETIC_SWITCHING_TOOLHEAD`: a shallow Cube whose bed rides a single central pillar and threaded rod, with tools parked in rear docks).
+  DELTA builds show the Delta, SCARA builds the SCARA, BELTPRINTER builds the Belt Printer, switching-toolhead builds the Toolchanger; other builds offer the Bedslinger and the Cube.
+- **Toolchanger:** the docks sit at `SWITCHING_TOOLHEAD_X_POS[]` and `SWITCHING_TOOLHEAD_Y_POS`. Each tool is a tinted heater block and nozzle with a
+  coupling block. It rides the carriage while it is the tool grabbed, and sits in its dock otherwise. The model follows the carriage position,
+  so it shows whatever the firmware's tool change actually does.
 - **Belt printer:** Marlin Y moves the nozzle up the tilted gantry (Y=0 is the tip on the belt) and Z feeds the belt
   toward the open front. The simulator draws the physical result of the G-code it receives, so G-code sliced for
   a belt printer (for example by OrcaSlicer's belt mode) prints upright. The print rides the belt away from the nozzle.

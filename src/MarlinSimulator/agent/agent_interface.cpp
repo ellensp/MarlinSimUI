@@ -300,7 +300,7 @@ void handle_post_serial(const Request& request, Response& response) {
 // POST /view — set the Viewport camera (Turntable mode). All keys optional:
 //   {"preset":"home|front|right|back|left|top|iso", "yaw":deg, "pitch":deg,
 //    "distance":mm, "x":mm, "y":mm, "z":mm (target, Marlin coordinates; all three),
-//    "follow":bool, "machine":"bedslinger|cube|delta|scara|belt", "markings":bool, "volume":bool}
+//    "follow":bool, "machine":"bedslinger|cube|delta|scara|belt|toolchanger", "markings":bool, "volume":bool}
 // Applied on the next UI frame; poll GET /view to confirm.
 void handle_get_view(const Request&, Response& response) {
   const view_control::State v = view_control::current();
@@ -309,6 +309,7 @@ void handle_get_view(const Request&, Response& response) {
   writer.member("ok", true);
   writer.member("mode", v.turntable ? "turntable" : "fly");
   writer.member("machine", v.machine);
+  if (v.tool_held != -2) writer.member("tool_held", double(v.tool_held));
   writer.member("yaw", double(v.yaw));
   writer.member("pitch", double(v.pitch));
   writer.member("distance", double(v.distance));

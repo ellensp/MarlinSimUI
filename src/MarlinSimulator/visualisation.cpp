@@ -581,6 +581,8 @@ void Visualisation::destroy() {
 //
 void Visualisation::set_head_position(size_t hotend_index, extruder_state& state) {
   if (!m_initialised || hotend_index >= extrusion.size()) return;
+  // The toolchanger follows the carriage (the T0 nozzle) on every update, so that no dock visit is missed between frames
+  if (hotend_index == 0 && machine.type == MACHINE_TOOLCHANGER) machine.update_tool_holder({ state.position.x, state.position.y });
   glm::vec4 sim_pos = state.position;
   const glm::vec4 raw = {sim_pos.x, sim_pos.z, sim_pos.y * -1.0, sim_pos.w}; // correct for opengl coordinate system
   const glm::vec4 position = trail_position(machine.type, sim_pos);        // Where the trail is drawn (belt: in the belt's frame)
@@ -827,6 +829,7 @@ void Visualisation::apply_view_request() {
   s.target[0] = turntable.target.x; s.target[1] = -turntable.target.z; s.target[2] = turntable.target.y;
   s.follow = follow_nozzle;
   s.machine = MachineModel::type_name(machine.type);
+  s.tool_held = machine.type == MACHINE_TOOLCHANGER ? machine.tool_held.load() : -2;
   s.markings = bed_markings.visible;
   s.volume = reach_volume.visible;
 }

@@ -23,7 +23,7 @@ struct Request {
   bool markings = true; // Bed markings shown
   bool volume = false;  // Delta printable volume shown
   std::string preset;  // home, front, right, back, left, top, iso
-  std::string machine; // bedslinger, cube, delta, scara, belt
+  std::string machine; // bedslinger, cube, delta, scara, belt, toolchanger
 };
 
 struct State {
@@ -34,6 +34,7 @@ struct State {
   bool markings = true;
   bool volume = false;
   std::string machine;
+  int tool_held = -2;  // Toolchanger: tool on the carriage, -1 if none; -2 when the model is not a toolchanger
 };
 
 inline std::mutex mutex;

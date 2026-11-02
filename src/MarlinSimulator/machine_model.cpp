@@ -13,6 +13,7 @@
 #if HAS_BED_PROBE
   #include <src/module/probe.h> // probe.offset (M851)
 #endif
+#include <src/module/motion.h> // motion.extruder: the active tool
 
 #include "hardware/KinematicSystem.h" // hotend_offset_mm
 #include "scara_frame.h"
@@ -389,6 +390,7 @@ MachineType machine_type_from_name(const char* name) {
   if (n == "delta")                      return MACHINE_DELTA;
   if (n == "scara")                      return MACHINE_SCARA;
   if (n == "belt" || n == "beltprinter") return MACHINE_BELT;
+  if (n == "toolchanger" || n == "tools") return MACHINE_TOOLCHANGER;
   return MACHINE_TYPE_COUNT;
 }
 
@@ -399,6 +401,7 @@ const char* MachineModel::type_name(const MachineType type) {
     case MACHINE_DELTA:      return "Delta";
     case MACHINE_SCARA:      return "SCARA";
     case MACHINE_BELT:       return "Belt Printer";
+    case MACHINE_TOOLCHANGER: return "Toolchanger";
     default:                 return "?";
   }
 }
@@ -413,8 +416,10 @@ bool MachineModel::is_available(const MachineType type) {
     return type == MACHINE_SCARA;
   #elif ENABLED(BELTPRINTER)
     return type == MACHINE_BELT;
+  #elif ANY(SWITCHING_TOOLHEAD, MAGNETIC_SWITCHING_TOOLHEAD, ELECTROMAGNETIC_SWITCHING_TOOLHEAD)
+    return type == MACHINE_TOOLCHANGER;
   #else
-    return type < MACHINE_TYPE_COUNT && type != MACHINE_DELTA && type != MACHINE_SCARA && type != MACHINE_BELT;
+    return type < MACHINE_TYPE_COUNT && type != MACHINE_DELTA && type != MACHINE_SCARA && type != MACHINE_BELT && type != MACHINE_TOOLCHANGER;
   #endif
 }
 
@@ -425,6 +430,8 @@ MachineType MachineModel::default_type() {
     return MACHINE_SCARA;
   #elif ENABLED(BELTPRINTER)
     return MACHINE_BELT;
+  #elif ANY(SWITCHING_TOOLHEAD, MAGNETIC_SWITCHING_TOOLHEAD, ELECTROMAGNETIC_SWITCHING_TOOLHEAD)
+    return MACHINE_TOOLCHANGER;
   #elif IS_CORE || ANY(MARKFORGED_XY, MARKFORGED_YX)
     return MACHINE_CUBE;
   #else
@@ -519,6 +526,7 @@ void MachineModel::build(const MachineType new_type, std::shared_ptr<renderer::S
   bounds_max = glm::vec3(bed_x, bed_z, 0);
   switch (type) {
     case MACHINE_CUBE:  build_cube();  break;
+    case MACHINE_TOOLCHANGER: build_cube(true); break;
     case MACHINE_DELTA: build_delta(); break;
     case MACHINE_SCARA: build_scara(); break;
     case MACHINE_BELT:  build_belt(); break;
@@ -556,6 +564,7 @@ MachinePose MachineModel::pose(const glm::vec3 nozzle, const float x2) const {
       p.bed_offset = { 0, 0, nozzle.y - bed_y * 0.5f - lo.z };
     } break;
     case MACHINE_CUBE:
+    case MACHINE_TOOLCHANGER:
     case MACHINE_SCARA:
       // The nozzle stays at the top; the bed drops as Z increases
       p.bed_offset = { 0, bed_z - nozzle.z, 0 };
@@ -771,6 +780,77 @@ void MachineModel::build_bedslinger() {
 //                   ends when there's a Y2 stepper; a single Y driver may drive both.
 //   Toolheads (XY): one per X carriage (two with IDEX), and the probe on X1.
 //
+//
+// Toolchanger (MAGNETIC_SWITCHING_TOOLHEAD). Marlin's tool_change() parks the tool in its dock at
+// (SWITCHING_TOOLHEAD_X_POS[tool], SWITCHING_TOOLHEAD_Y_POS), in the carriage's own frame, then
+// grabs the next one the same way. Coming from +Y the carriage mates with a tool at Y_POS, and
+// leaves the tool behind by backing off by Y_RELEASE (it pulls the tool out of its dock sideways
+// to grab). The model follows that from the carriage position alone, so it shows whatever
+// the firmware does, including a tool change that goes wrong.
+//
+bool MachineModel::is_toolchanger() { return ANY(SWITCHING_TOOLHEAD, MAGNETIC_SWITCHING_TOOLHEAD, ELECTROMAGNETIC_SWITCHING_TOOLHEAD); }
+
+#if ANY(SWITCHING_TOOLHEAD, MAGNETIC_SWITCHING_TOOLHEAD, ELECTROMAGNETIC_SWITCHING_TOOLHEAD)
+  static constexpr float dock_x_pos[] = SWITCHING_TOOLHEAD_X_POS;
+  static constexpr float dock_y_pos = SWITCHING_TOOLHEAD_Y_POS;
+  #ifdef SWITCHING_TOOLHEAD_Y_RELEASE
+    static constexpr float dock_y_release = SWITCHING_TOOLHEAD_Y_RELEASE;
+  #else
+    static constexpr float dock_y_release = 5;
+  #endif
+  static constexpr int dock_count = int(sizeof(dock_x_pos) / sizeof(dock_x_pos[0]));
+  static constexpr float dock_tolerance = 0.5f;   // How near the carriage's X must be to a dock's to mate with it (mm)
+#else
+  static constexpr int dock_count = 0;
+#endif
+
+glm::vec2 MachineModel::dock_xy(const int tool) {
+  #if ANY(SWITCHING_TOOLHEAD, MAGNETIC_SWITCHING_TOOLHEAD, ELECTROMAGNETIC_SWITCHING_TOOLHEAD)
+    if (tool >= 0 && tool < dock_count)
+      return { dock_x_pos[tool] + float(X_BED_SIZE) * 0.5f - float(X_CENTER), dock_y_pos + float(Y_BED_SIZE) * 0.5f - float(Y_CENTER) };
+  #else
+    UNUSED(tool);
+  #endif
+  return {};
+}
+
+// Decide which tool is on the carriage. Mate with a dock = at its X, at Y_POS (arriving from +Y): from then on the
+// carriage holds that tool, and when it backs off by more than half of Y_RELEASE at that dock's X, the tool is left
+// there. Away from the docks (clearly in front of Y_POS) the firmware's own idea of the active tool is the truth,
+// which also keeps a stray move through a dock's X from dropping the tool.
+void MachineModel::update_tool_holder(const glm::vec2 c) {
+  #if DISABLED(MAGNETIC_SWITCHING_TOOLHEAD)
+    // The pickup and drop-off choreography is modeled for the magnetic variant only. The others
+    // show the tool Marlin says is active, so a tool appears on the carriage when the change ends.
+    UNUSED(c);
+    tool_held = std::min(int(motion.extruder), std::max(1, hotend_count()) - 1);
+  #else
+    const float y_dock = dock_xy(0).y;
+    const int active = std::min(int(motion.extruder), std::min(dock_count, hotend_count()) - 1);
+    if (c.y < y_dock - 2.0f) {            // In the working area
+      tool_held = active;
+      tool_seated = false;
+      return;
+    }
+    if (tool_held >= 0) {
+      const glm::vec2 d = dock_xy(tool_held);
+      const bool at_dock_x = std::abs(c.x - d.x) < dock_tolerance;
+      if (!at_dock_x) tool_seated = false;                                                    // Moved away (or past) the dock: no longer mated
+      else if (c.y <= y_dock + 1.0f) tool_seated = true;                                      // Mated with its own dock
+      else if (tool_seated && c.y > y_dock + std::max(1.0f, dock_y_release * 0.5f)) {         // Backed off while mated: left behind
+        tool_held = -1;
+        tool_seated = false;
+      }
+    }
+    else {                                 // Empty carriage: mating with a dock grabs the tool in it
+      for (int t = 0; t < std::min(dock_count, hotend_count()); ++t) {
+        const glm::vec2 d = dock_xy(t);
+        if (std::abs(c.x - d.x) < dock_tolerance && c.y <= y_dock + 1.0f) { tool_held = t; tool_seated = true; break; }
+      }
+    }
+  #endif
+}
+
 namespace cube {
   constexpr float w = 20;                           // Frame member width
   constexpr float rod_r = 4;                        // 8mm Y rails and X rods
@@ -893,7 +973,7 @@ namespace cube {
   }
 }
 
-void MachineModel::build_cube() {
+void MachineModel::build_cube(const bool toolchanger) {
   using namespace cube;
   constexpr bool is_core = ANY(IS_CORE, MARKFORGED_XY, MARKFORGED_YX);
   const float rail_y = bed_z + rail_top_gap;          // Y rail height
@@ -914,7 +994,7 @@ void MachineModel::build_cube() {
 
   // Z drives (GL XZ), and with a single Z stepper two guide rods beside its screw
   std::vector<glm::vec2> zd;
-  for (const auto& p : z_drive_xy()) zd.push_back({ p.x, -p.y });
+  if (!toolchanger) for (const auto& p : z_drive_xy()) zd.push_back({ p.x, -p.y });   // The toolchanger has no Z rods or corner drives
   std::vector<glm::vec2> guides;
   if (zd.size() == 1) guides = { { bed_x * 0.25f, zd[0].y }, { bed_x * 0.75f, zd[0].y } };
 
@@ -927,16 +1007,54 @@ void MachineModel::build_cube() {
     in_l = std::min(in_l, p.x - r); in_r = std::max(in_r, p.x + r);
     in_b = std::min(in_b, p.y - r); in_f = std::max(in_f, p.y + r);
   }
+  // Toolchanger Z axis: ONE threaded rod (lead screw) and no smooth guide rods. A 40x40 pillar stands at the middle of the
+  // bed, just behind its back edge, and the bed's carriage rides it and the threaded rod beside it, with the bed
+  // cantilevered forward from the carriage. The pillar stops just under the nozzle plane, so the gantry passes over it
+  // on the way to the docks behind it.
+  constexpr float pillar_w = 40, pillar_gap = 10, pillar_top_gap = 8;
+  constexpr float carriage_lo = -59, carriage_hi = -9;       // The bed carriage's extent relative to the top of the bed
+  const float pillar_cx = bed_x * 0.5f;
+  const float pillar_zf = -bed_y - plate_lip - pillar_gap;   // Front face of the pillar (GL z)
+  const float pillar_zb = pillar_zf - pillar_w;
+  const float screw_z = pillar_zf + nema17 * 0.5f;           // The threaded rod, with its motor against the pillar
+  const float pillar_top = bed_z - pillar_top_gap;
+
+  // Toolchanger: where each tool's nozzle sits when parked (GL XZ), at the firmware's dock position plus the tool's offset.
+  // The frame must reach around the docks, with room behind them for the bracket that holds each one.
+  constexpr float tool_half = 13;                      // Half the width of a tool's coupling block
+  std::vector<glm::vec2> docks;
+  if (toolchanger) {
+    for (int t = 0; t < hotend_count(); ++t) {
+      const glm::vec2 d = dock_xy(t);
+      const glm::vec3 o = hotend_offset(t);
+      docks.push_back({ d.x + o.x, -d.y + o.z });
+    }
+    for (const auto& d : docks) {
+      in_l = std::min(in_l, d.x - tool_half - 10); in_r = std::max(in_r, d.x + tool_half + 10);
+      in_b = std::min(in_b, d.y - tool_half - 40); in_f = std::max(in_f, d.y + tool_half + 10);
+    }
+    in_b = std::min(in_b, pillar_zb - 10);                // Room behind the pillar for its cross-member
+  }
   Frame fr;
   fr.x0 = in_l - w; fr.x1 = in_r + w;
   fr.z0 = in_b - w; fr.z1 = in_f + w;
-  fr.y0 = collar_lo - 2 - nema17 - w;                  // Z motors fit under the bed collars at the bottom
+  // Z motors fit under the bed collars at the bottom (the toolchanger's, under the lowest position of the bed carriage)
+  fr.y0 = (toolchanger ? carriage_lo : collar_lo) - 2 - nema17 - w;
   fr.y1 = is_core ? bed_z + 110 : std::max(bed_z + 110, gm_bottom + nema17 + 2 + w);
 
   const float beam_y = bed_z + 5;                     // Side beams holding the Z screw tops, just over the top of the bed travel
 
   add_part([&](VertexBuffer& b) {
     add_frame_box(b, fr);
+    if (toolchanger) {
+      const float base = fr.y0 + w;                                      // Top of the bottom ring
+      add_box(b, {pillar_cx - pillar_w * 0.5f, fr.y0, pillar_zb}, {pillar_cx + pillar_w * 0.5f, pillar_top, pillar_zf}, color::frame);
+      if (pillar_zb - fr.inner(SIDE_BACK) > 1)                           // Cross-member from the back beam to the pillar's foot
+        add_box(b, {pillar_cx - w * 0.5f, fr.y0, fr.inner(SIDE_BACK)}, {pillar_cx + w * 0.5f, fr.y0 + w, pillar_zb}, color::frame);
+      add_box(b, {pillar_cx - 26, base - 6, pillar_zf}, {pillar_cx + 26, base, screw_z + nema17 * 0.5f + 5}, color::printed);   // Motor plate
+      add_motor(b, {pillar_cx, base + nema17 * 0.5f, screw_z});
+      add_cylinder(b, {pillar_cx, base + nema17, screw_z}, {pillar_cx, pillar_top - 4, screw_z}, zscrew_r, color::screw);
+    }
     bool beam[4] {};
     for (const auto& p : zd) beam[fr.nearest_side(p)] = true;
     for (int s = 0; s < 4; ++s) if (beam[s]) add_side_beam(b, fr, Side(s), beam_y);
@@ -952,11 +1070,30 @@ void MachineModel::build_cube() {
       add_motor(b, {fr.inner(s ? SIDE_RIGHT : SIDE_LEFT) + in(s) * nema17 * 0.5f, fr.y1 - w + nema17 * 0.5f, fr.inner(SIDE_BACK) + nema17 * 0.5f});
   });
 
+  // Docks: a printed bracket from the nearest frame side to the back of each parked tool's coupling block
+  if (toolchanger) add_part([&](VertexBuffer& b) {
+    const float y0 = bed_z + 17, y1 = bed_z + hotend_cold_top - 6;
+    for (const auto& d : docks) {
+      const float f = fr.inner(fr.nearest_side(d));
+      switch (fr.nearest_side(d)) {
+        case SIDE_BACK:  add_box(b, {d.x - tool_half, y0, f}, {d.x + tool_half, y1, d.y - tool_half}, color::printed); break;
+        case SIDE_FRONT: add_box(b, {d.x - tool_half, y0, d.y + tool_half}, {d.x + tool_half, y1, f}, color::printed); break;
+        case SIDE_LEFT:  add_box(b, {f, y0, d.y - tool_half}, {d.x - tool_half, y1, d.y + tool_half}, color::printed); break;
+        case SIDE_RIGHT: add_box(b, {d.x + tool_half, y0, d.y - tool_half}, {f, y1, d.y + tool_half}, color::printed); break;
+      }
+    }
+  });
+
   // Bed, which rides Z: the plate, and a collar and arm at every Z screw and guide rod
   add_part([&](VertexBuffer& b) {
     add_box(b, {-plate_lip, -9, -bed_y - plate_lip}, {bed_x + plate_lip, bed_top, plate_lip}, color::bed);
     for (const auto& p : zd) add_bed_collar(b, p);
     for (const auto& p : guides) add_bed_collar(b, p);
+    if (toolchanger) {
+      // The carriage, clamped around the pillar and the threaded rod, and a wide arm under the back of the plate
+      add_box(b, {pillar_cx - pillar_w * 0.5f - 6, carriage_lo, pillar_zb - 6}, {pillar_cx + pillar_w * 0.5f + 6, carriage_hi, screw_z + 14}, color::printed);
+      add_box(b, {bed_x * 0.15f, carriage_hi - 5, -bed_y - plate_lip}, {bed_x * 0.85f, carriage_hi, -bed_y - plate_lip + 40}, color::printed);
+    }
   }, [](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.bed_offset); });
 
   // X gantry, which follows the nozzle on Y: two X rods side by side (front and back) between
@@ -976,10 +1113,11 @@ void MachineModel::build_cube() {
   for (int c = 0; c < carriage_count(); ++c) {
     glm::vec3 lo, hi;
     hotend_extent(lo, hi, c);
-    const glm::vec3 blo { lo.x - head_margin, lo.y + 30, all_lo.z - head_margin }, bhi { hi.x + head_margin, hi.y + 85, all_hi.z + head_margin };
+    // A toolchanger's carriage is the coupling plate over the tool it holds; each tool brings its own cold end
+    const glm::vec3 blo { lo.x - head_margin, toolchanger ? hotend_cold_top : lo.y + 30, all_lo.z - head_margin }, bhi { hi.x + head_margin, hi.y + 85, all_hi.z + head_margin };
     add_part([&](VertexBuffer& b) {
       add_box(b, blo, bhi, color::printed);
-      add_cold_ends(b, c);
+      if (!toolchanger) add_cold_ends(b, c);
     }, c ? Animate([](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.x2_world); })
          : Animate([](renderer::Mesh& m, const MachinePose& p) { move_to(m, p.nozzle_world); }), false);
     // The probe mounts to the side of the X1 toolhead nearest to it
@@ -988,7 +1126,23 @@ void MachineModel::build_cube() {
       add_probe([=](const glm::vec2 q) { return glm::clamp(q, plo, phi); }, blo.y, bhi.y);
     }
   }
-  add_hot_parts();
+  if (!toolchanger) { add_hot_parts(); return; }
+
+  // Tools: the usual tinted heater block and nozzle, and a block for the coupling that mates with the carriage.
+  // A tool follows the carriage while it is the one held, and otherwise sits in its dock.
+  for (int h = 0; h < hotend_count(); ++h) {
+    const glm::vec3 offset = hotend_offset(h);
+    const glm::vec2 parked = docks[h];
+    const Animate follow = [this, h, offset, parked](renderer::Mesh& m, const MachinePose& p) {
+      move_to(m, tool_held == h ? p.nozzle_world + offset : glm::vec3(parked.x, p.nozzle_world.y + offset.y, parked.y));
+    };
+    const auto hot = add_part([](VertexBuffer& b) { add_hotend_hot(b); }, follow, false);
+    auto mesh = renderer::get_mesh_by_id(hot);
+    mesh->m_shader_instance->set_uniform("u_tint", &hotend_tint[h]);
+    mesh->m_shader_instance->set_uniform("u_glow", &hotend_glow[h]);
+    mesh->m_shader_instance->set_uniform("u_dim", &hotend_dim[h]);
+    add_part([](VertexBuffer& b) { add_box(b, {-tool_half, 17, -tool_half}, {tool_half, hotend_cold_top, tool_half}, color::printed); }, follow, false);
+  }
 }
 
 //

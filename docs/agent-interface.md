@@ -35,7 +35,7 @@ Command-line options:
 | `--agent-port <n>` | Enable the agent interface on `127.0.0.1:<n>` (or `MARLIN_SIM_AGENT_PORT`). Off by default. |
 | `--serial-port <n>` | TCP port for the raw G-code socket (default 8099, or `MARLIN_SIM_SERIAL_PORT`). |
 | `--no-audio` | Disable buzzer/audio emulation (useful for unattended runs). |
-| `--machine <type>` | Viewport printer model: `bedslinger`, `cube`, `delta`, `scara` or `belt`. Default follows the build's kinematics. DELTA builds accept only `delta`, SCARA builds only `scara`, BELTPRINTER builds only `belt`; other builds accept `bedslinger` and `cube`. |
+| `--machine <type>` | Viewport printer model: `bedslinger`, `cube`, `delta`, `scara`, `belt` or `toolchanger`. Default follows the build's kinematics. DELTA builds accept only `delta`, SCARA builds only `scara`, BELTPRINTER builds only `belt`, MAGNETIC_SWITCHING_TOOLHEAD builds only `toolchanger`; other builds accept `bedslinger` and `cube`. |
 | `--belt-angle <deg>` | Belt printer gantry tilt from the belt, 1 to 89 degrees (default 45). Ignored by other models. |
 | `--help` | Usage. |
 
@@ -182,6 +182,11 @@ belief — the difference between the two is usually the bug.
 "pitch", "distance", "x", "y", "z", "follow", "markings", "volume"}`. `x`,`y`,`z` is the camera
 target.
 
+On the Toolchanger model it also returns `"tool_held"`: the tool on the carriage, or -1 while the carriage is empty
+between dropping one tool and grabbing the next. It is decided from the carriage position on the simulation thread
+(grab on mating with a dock at `SWITCHING_TOOLHEAD_X_POS[t]` / `SWITCHING_TOOLHEAD_Y_POS`, left behind on backing off by
+`SWITCHING_TOOLHEAD_Y_RELEASE`), so a script can assert the order of a tool change: `T1` from T0 reads 0, -1, 1.
+
 `POST /view` switches to the Turntable camera and applies any of these keys
 (all optional):
 
@@ -192,7 +197,7 @@ target.
 | `distance` | mm from the target, > 0. |
 | `x`, `y`, `z` | Camera target in Marlin coordinates (mm). All three or none. |
 | `follow` | `true` keeps the nozzle at the view center. |
-| `machine` | `bedslinger`, `cube`, `delta`, `scara` or `belt`; same availability rule as `--machine`. |
+| `machine` | `bedslinger`, `cube`, `delta`, `scara`, `belt` or `toolchanger`; same availability rule as `--machine`. |
 | `markings` | `true`/`false` shows or hides the bed markings (origin, safe homing point, probeable area, tool reach, mesh grid), like Printer > Bed Markings. |
 | `volume` | `true`/`false` shows or hides the translucent printable volume of the active tool, like Printer > Printable Volume. DELTA builds only; always `false` otherwise. |
 
